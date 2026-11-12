@@ -1,11 +1,11 @@
-export const APP_NAME = "Browser MCP";
+export const APP_NAME = "PrivateAI Browser";
 
-/** The docs: setting up the server in each AI app, the `browser` tool, troubleshooting */
-export const DOCS_URL = "https://browsermcp.io/docs";
+/** Project docs (OWUI bridge) */
+export const DOCS_URL = "https://github.com/Lntech-ai/privateai-browser#readme";
 
-/** How to update the server (and the store's extension) */
+/** Upstream Browser MCP docs (local daemon path) */
 export const UPDATE_SERVER_URL = "https://browsermcp.io/#update";
 
-/** How to update an extension built from source */
+/** How to update this fork */
 export const UPDATE_EXTENSION_URL =
-  "https://github.com/BrowserMCP/mcp#updating";
+  "https://github.com/Lntech-ai/privateai-browser#install-load-unpacked";

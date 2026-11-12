@@ -1,7 +1,7 @@
 {
-  "name": "@browsermcp/extension",
-  "version": "2.2.3",
-  "description": "Browser MCP's extension for Chrome and other Chromium browsers, built from source",
+  "name": "@privateai/browser-extension",
+  "version": "0.1.0",
+  "description": "PrivateAI Browser: Chrome extension that registers with Open WebUI for per-user remote browser tools",
   "license": "Apache-2.0",
   "type": "module",
   "private": true,
@@ -19,7 +19,8 @@
     "@browsermcp/protocol": "workspace:*",
     "lucide-react": "^1.70.0",
     "react": "^19.3.1",
-    "react-dom": "^19.3.1"
+    "react-dom": "^19.3.1",
+    "socket.io-client": "^4.8.1"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",

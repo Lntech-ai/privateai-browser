@@ -5,14 +5,26 @@ import {
   handleBrowserControlMessages,
 } from "@browsermcp/extension-core";
 
+import { restoreBridge } from "@/lib/owui-bridge";
+
 /**
- * The service worker: browser control, the connection to the Browser MCP daemon and the `chrome.debugger` relay (`@browsermcp/extension-core`). Chrome stops it whenever it's idle, so its listeners are added synchronously here, and its state lives in `browser.storage`
+ * Service worker: optional local Browser MCP daemon control (upstream) plus
+ * PrivateAI OWUI reverse bridge (Socket.IO + chrome.debugger actions).
  */
 export default defineBackground(() => {
   handleBrowserControlMessages(
     addBrowserControl({
-      // The smoke test's fake 0.1.x server
       legacyPortOverride: import.meta.env.MODE !== "production",
     }),
   );
+
+  // Keep OWUI bridge alive across SW wake-ups.
+  void restoreBridge();
+  chrome.runtime.onStartup.addListener(() => {
+    void restoreBridge();
+  });
+  chrome.alarms.create("privateai-owui-keepalive", { periodInMinutes: 1 });
+  chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name === "privateai-owui-keepalive") void restoreBridge();
+  });
 });
