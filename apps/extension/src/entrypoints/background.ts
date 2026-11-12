@@ -1,24 +1,15 @@
 import { defineBackground } from "wxt/utils/define-background";
 
-import {
-  addBrowserControl,
-  handleBrowserControlMessages,
-} from "@browsermcp/extension-core";
-
 import { restoreBridge } from "@/lib/owui-bridge";
 
 /**
- * Service worker: optional local Browser MCP daemon control (upstream) plus
- * PrivateAI OWUI reverse bridge (Socket.IO + chrome.debugger actions).
+ * Service worker for PrivateAI Browser (OWUI reverse bridge only).
+ *
+ * Upstream Browser MCP's local-daemon probe (`127.0.0.1:9010–9012/browsermcp/status`)
+ * is intentionally NOT started here — it spams ERR_CONNECTION_REFUSED when no
+ * local daemon is running, and the OWUI path does not need it.
  */
 export default defineBackground(() => {
-  handleBrowserControlMessages(
-    addBrowserControl({
-      legacyPortOverride: import.meta.env.MODE !== "production",
-    }),
-  );
-
-  // Keep OWUI bridge alive across SW wake-ups.
   void restoreBridge();
   chrome.runtime.onStartup.addListener(() => {
     void restoreBridge();
