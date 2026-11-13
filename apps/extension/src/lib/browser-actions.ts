@@ -1,9 +1,13 @@
 /**
- * Minimal chrome.tabs / chrome.debugger actions for the OWUI bridge.
+ * chrome.tabs / chrome.scripting actions for the OWUI bridge.
  * Tab rules: refuse chrome:// and extension pages; honor Stop.
+ * Prefer a11y snapshot refs (e12) over fragile CSS selectors.
  */
 
+import { buildSnapshotInPage, clickInPage, typeInPage } from "./page-snapshot";
+
 const AGENT_GROUP_TITLE = "PrivateAI Browser";
+const ACTIVE_TAB_KEY = "privateai_agent_tab_id";
 
 let stopped = false;
 let activeTabId: number | null = null;
@@ -35,9 +39,76 @@ function assertNavigableUrl(url: string) {
   return parsed.href;
 }
 
+async function rememberActiveTab(tabId: number | null) {
+  activeTabId = tabId;
+  try {
+    if (tabId == null) {
+      await chrome.storage.session.remove(ACTIVE_TAB_KEY);
+    } else {
+      await chrome.storage.session.set({ [ACTIVE_TAB_KEY]: tabId });
+    }
+  } catch {
+    // session storage may be unavailable in some builds
+  }
+}
+
+async function loadRememberedTabId(): Promise<number | null> {
+  if (activeTabId != null) {
+    try {
+      await chrome.tabs.get(activeTabId);
+      return activeTabId;
+    } catch {
+      activeTabId = null;
+    }
+  }
+  try {
+    const stored = await chrome.storage.session.get(ACTIVE_TAB_KEY);
+    const id = stored[ACTIVE_TAB_KEY];
+    if (typeof id === "number") {
+      await chrome.tabs.get(id);
+      activeTabId = id;
+      return id;
+    }
+  } catch {
+    // missing / closed
+  }
+  return null;
+}
+
+async function findAgentGroupId(windowId?: number): Promise<number | null> {
+  try {
+    const query: chrome.tabGroups.QueryInfo = { title: AGENT_GROUP_TITLE };
+    if (windowId != null) query.windowId = windowId;
+    const groups = await chrome.tabGroups.query(query);
+    if (groups[0]?.id != null) return groups[0].id;
+    // Fallback: any window, in case the agent group is on another window
+    if (windowId != null) {
+      const any = await chrome.tabGroups.query({ title: AGENT_GROUP_TITLE });
+      if (any[0]?.id != null) return any[0].id;
+    }
+  } catch {
+    // tabGroups may be unavailable
+  }
+  return null;
+}
+
+/** Reuse existing PrivateAI group; never spawn a second group for the same agent. */
 async function ensureAgentGroup(tabId: number) {
   try {
     const tab = await chrome.tabs.get(tabId);
+    const existingGroupId = await findAgentGroupId(tab.windowId);
+
+    if (existingGroupId != null) {
+      if (tab.groupId !== existingGroupId) {
+        await chrome.tabs.group({ tabIds: [tabId], groupId: existingGroupId });
+      }
+      await chrome.tabGroups.update(existingGroupId, {
+        title: AGENT_GROUP_TITLE,
+        color: "blue",
+      });
+      return;
+    }
+
     if (tab.groupId && tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE) {
       await chrome.tabGroups.update(tab.groupId, {
         title: AGENT_GROUP_TITLE,
@@ -45,6 +116,7 @@ async function ensureAgentGroup(tabId: number) {
       });
       return;
     }
+
     const groupId = await chrome.tabs.group({ tabIds: [tabId] });
     await chrome.tabGroups.update(groupId, {
       title: AGENT_GROUP_TITLE,
@@ -55,14 +127,57 @@ async function ensureAgentGroup(tabId: number) {
   }
 }
 
-async function attachDebugger(tabId: number) {
-  const target = { tabId };
-  try {
-    await chrome.debugger.attach(target, "1.3");
-  } catch (error) {
-    const message = String(error);
-    if (!message.includes("Already attached")) throw error;
+/**
+ * Resolve the current agent tab for click/snapshot/type (no navigation).
+ * Does not care about origin — just the remembered / grouped agent tab.
+ */
+async function resolveActiveAgentTabId(): Promise<number | null> {
+  const remembered = await loadRememberedTabId();
+  if (remembered != null) return remembered;
+
+  const groupId = await findAgentGroupId();
+  if (groupId != null) {
+    const grouped = await chrome.tabs.query({ groupId });
+    const active = grouped.find((t) => t.active && t.id != null);
+    if (active?.id != null) return active.id;
+    if (grouped[0]?.id != null) return grouped[0].id;
   }
+  return null;
+}
+
+function urlsMatch(a: string | undefined, b: string): boolean {
+  if (!a) return false;
+  if (a === b) return true;
+  try {
+    const ua = new URL(a);
+    const ub = new URL(b);
+    // Ignore hash; treat trailing slash as equivalent on pathname
+    const norm = (u: URL) => {
+      const path = u.pathname.replace(/\/+$/, "") || "/";
+      return `${u.origin}${path}${u.search}`;
+    };
+    return norm(ua) === norm(ub);
+  } catch {
+    return false;
+  }
+}
+
+/** Exact URL already open (agent group first, then any window). */
+async function findExactTabForUrl(url: string): Promise<number | null> {
+  const groupId = await findAgentGroupId();
+  if (groupId != null) {
+    const grouped = await chrome.tabs.query({ groupId });
+    const hit = grouped.find(
+      (t) => t.id != null && (urlsMatch(t.url, url) || urlsMatch(t.pendingUrl, url)),
+    );
+    if (hit?.id != null) return hit.id;
+  }
+
+  const all = await chrome.tabs.query({});
+  const hit = all.find(
+    (t) => t.id != null && (urlsMatch(t.url, url) || urlsMatch(t.pendingUrl, url)),
+  );
+  return hit?.id ?? null;
 }
 
 async function detachDebugger(tabId: number) {
@@ -73,27 +188,59 @@ async function detachDebugger(tabId: number) {
   }
 }
 
-async function cdp(tabId: number, method: string, params?: Record<string, unknown>) {
-  await attachDebugger(tabId);
-  return chrome.debugger.sendCommand({ tabId }, method, params);
+async function ensureAgentTab(): Promise<number> {
+  const reusable = await resolveActiveAgentTabId();
+  if (reusable != null) {
+    await rememberActiveTab(reusable);
+    return reusable;
+  }
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id) throw new Error("No active tab");
+  await rememberActiveTab(tab.id);
+  return tab.id;
+}
+
+function resolveTarget(params: {
+  ref?: string;
+  selector?: string;
+  target?: string;
+}): string {
+  return String(params.ref || params.target || params.selector || "").trim();
 }
 
 export async function navigate(params: { url: string; new_tab?: boolean }) {
   assertNotStopped();
   const url = assertNavigableUrl(params.url);
-  let tabId = activeTabId;
-  if (params.new_tab || tabId == null) {
+
+  // Default: open a new tab in the PrivateAI group (AI decides later what to close).
+  // new_tab=false → reuse the current agent tab in place (e.g. follow a link path).
+  // Exact URL already open → just focus it (no duplicate).
+  const forceNew = params.new_tab !== false;
+  let tabId: number | null = await findExactTabForUrl(url);
+  let created = false;
+
+  if (tabId != null) {
+    await chrome.tabs.update(tabId, { active: true });
+  } else if (!forceNew) {
+    tabId = await resolveActiveAgentTabId();
+    if (tabId != null) {
+      await chrome.tabs.update(tabId, { url, active: true });
+    }
+  }
+
+  if (tabId == null) {
     const tab = await chrome.tabs.create({ url, active: true });
     tabId = tab.id!;
-  } else {
-    await chrome.tabs.update(tabId, { url, active: true });
+    created = true;
   }
-  activeTabId = tabId;
+
+  await rememberActiveTab(tabId);
   await ensureAgentGroup(tabId);
-  return { ok: true, tabId, url };
+  return { ok: true, tabId, url, created };
 }
 
 export async function tabList() {
+  const groupId = await findAgentGroupId();
   const tabs = await chrome.tabs.query({});
   const items = tabs
     .filter((t) => t.id != null && t.url && /^https?:/i.test(t.url))
@@ -103,66 +250,178 @@ export async function tabList() {
       url: t.url ?? "",
       active: t.active,
       agent: t.id === activeTabId,
+      in_group: groupId != null && t.groupId === groupId,
     }));
-  return { ok: true, tabs: items, activeTabId, stopped };
+  return {
+    ok: true,
+    tabs: items,
+    agent_tabs: items.filter((t) => t.in_group || t.agent),
+    activeTabId,
+    stopped,
+  };
+}
+
+export async function tabSwitch(params: {
+  tab_id?: number;
+  url_contains?: string;
+}) {
+  assertNotStopped();
+  let tabId = typeof params.tab_id === "number" ? params.tab_id : null;
+  const needle = String(params.url_contains || "").trim().toLowerCase();
+
+  if (tabId == null && needle) {
+    const groupId = await findAgentGroupId();
+    const pool =
+      groupId != null
+        ? await chrome.tabs.query({ groupId })
+        : await chrome.tabs.query({});
+    const hit = pool.find(
+      (t) =>
+        t.id != null &&
+        ((t.url || "").toLowerCase().includes(needle) ||
+          (t.title || "").toLowerCase().includes(needle)),
+    );
+    tabId = hit?.id ?? null;
+  }
+
+  if (tabId == null) {
+    return {
+      ok: false,
+      error: "Provide tab_id from browser_tab_list, or url_contains (e.g. 'web.whatsapp.com').",
+    };
+  }
+
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    await chrome.tabs.update(tabId, { active: true });
+    if (tab.windowId != null) {
+      await chrome.windows.update(tab.windowId, { focused: true });
+    }
+    await rememberActiveTab(tabId);
+    await ensureAgentGroup(tabId);
+    return {
+      ok: true,
+      tabId,
+      url: tab.url ?? "",
+      title: tab.title ?? "",
+    };
+  } catch {
+    return { ok: false, error: `Tab ${tabId} not found` };
+  }
+}
+
+export async function tabClose(params: { tab_id?: number } = {}) {
+  assertNotStopped();
+  let tabId =
+    typeof params.tab_id === "number" ? params.tab_id : await resolveActiveAgentTabId();
+  if (tabId == null) {
+    return { ok: false, error: "No tab to close" };
+  }
+
+  try {
+    await chrome.tabs.get(tabId);
+  } catch {
+    return { ok: false, error: `Tab ${tabId} not found` };
+  }
+
+  await chrome.tabs.remove(tabId);
+
+  if (activeTabId === tabId) {
+    const next = await resolveActiveAgentTabId();
+    if (next != null && next !== tabId) {
+      await rememberActiveTab(next);
+      try {
+        await chrome.tabs.update(next, { active: true });
+      } catch {
+        // ignore
+      }
+    } else {
+      await rememberActiveTab(null);
+    }
+  }
+
+  return { ok: true, closed: tabId, activeTabId };
 }
 
 export async function screenshot() {
   assertNotStopped();
-  if (activeTabId == null) {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab?.id) throw new Error("No active tab");
-    activeTabId = tab.id;
-  }
-  await chrome.tabs.update(activeTabId, { active: true });
+  const tabId = await ensureAgentTab();
+  await chrome.tabs.update(tabId, { active: true });
   const dataUrl = await chrome.tabs.captureVisibleTab({ format: "png" });
-  return { ok: true, tabId: activeTabId, dataUrl };
+  return { ok: true, tabId, dataUrl };
 }
 
-export async function click(params: { selector: string }) {
+export async function snapshot(params: {
+  interactive?: boolean;
+  max_nodes?: number;
+} = {}) {
   assertNotStopped();
-  if (activeTabId == null) throw new Error("No agent tab; navigate first");
-  const selector = params.selector;
-  const result = (await chrome.scripting.executeScript({
-    target: { tabId: activeTabId },
-    func: (sel: string) => {
-      const el = document.querySelector(sel) as HTMLElement | null;
-      if (!el) return { ok: false, error: `No element for selector: ${sel}` };
-      el.scrollIntoView({ block: "center", inline: "center" });
-      el.click();
-      return { ok: true };
-    },
-    args: [selector],
-  })) as Array<{ result?: { ok: boolean; error?: string } }>;
-  const out = result[0]?.result ?? { ok: false, error: "Script failed" };
-  return out;
+  const tabId = await ensureAgentTab();
+  const interactiveOnly = params.interactive !== false;
+  const maxNodes = Math.min(Math.max(Number(params.max_nodes) || 200, 1), 500);
+
+  const results = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: buildSnapshotInPage,
+    args: [interactiveOnly, maxNodes],
+  });
+  const out = results[0]?.result ?? { ok: false, error: "Snapshot failed" };
+  return { ...out, tabId };
 }
 
-export async function typeText(params: { selector: string; text: string; submit?: boolean }) {
+export async function click(params: {
+  ref?: string;
+  selector?: string;
+  target?: string;
+}) {
   assertNotStopped();
-  if (activeTabId == null) throw new Error("No agent tab; navigate first");
-  const result = (await chrome.scripting.executeScript({
-    target: { tabId: activeTabId },
-    func: (sel: string, text: string, submit: boolean) => {
-      const el = document.querySelector(sel) as HTMLInputElement | HTMLTextAreaElement | null;
-      if (!el) return { ok: false, error: `No element for selector: ${sel}` };
-      el.focus();
-      el.value = text;
-      el.dispatchEvent(new Event("input", { bubbles: true }));
-      el.dispatchEvent(new Event("change", { bubbles: true }));
-      if (submit) {
-        const form = el.closest("form");
-        if (form) form.requestSubmit();
-        else
-          el.dispatchEvent(
-            new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true }),
-          );
-      }
-      return { ok: true };
-    },
-    args: [params.selector, params.text, !!params.submit],
-  })) as Array<{ result?: { ok: boolean; error?: string } }>;
-  return result[0]?.result ?? { ok: false, error: "Script failed" };
+  const tabId = await ensureAgentTab();
+  const target = resolveTarget(params);
+  if (!target) {
+    return { ok: false, error: "Provide ref (from snapshot) or selector" };
+  }
+
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: clickInPage,
+      args: [target],
+    });
+    return results[0]?.result ?? { ok: false, error: "Click failed (no script result)" };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+export async function typeText(params: {
+  ref?: string;
+  selector?: string;
+  target?: string;
+  text?: string;
+  submit?: boolean;
+}) {
+  assertNotStopped();
+  const tabId = await ensureAgentTab();
+  // Empty target is allowed: page script focuses compose/textbox automatically.
+  const target = resolveTarget(params);
+  const text = String(params.text ?? "");
+
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: typeInPage,
+      args: [target, text, !!params.submit],
+    });
+    return results[0]?.result ?? { ok: false, error: "Type failed (no script result)" };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 export async function stopAgents() {
@@ -182,12 +441,26 @@ export async function handleAction(action: string, params: Record<string, unknow
       return navigate(params as { url: string; new_tab?: boolean });
     case "screenshot":
       return screenshot();
+    case "snapshot":
+      return snapshot(params as { interactive?: boolean; max_nodes?: number });
     case "tab_list":
       return tabList();
+    case "tab_switch":
+      return tabSwitch(params as { tab_id?: number; url_contains?: string });
+    case "tab_close":
+      return tabClose(params as { tab_id?: number });
     case "click":
-      return click(params as { selector: string });
+      return click(params as { ref?: string; selector?: string; target?: string });
     case "type":
-      return typeText(params as { selector: string; text: string; submit?: boolean });
+      return typeText(
+        params as {
+          ref?: string;
+          selector?: string;
+          target?: string;
+          text?: string;
+          submit?: boolean;
+        },
+      );
     case "stop":
       return stopAgents();
     case "resume":
