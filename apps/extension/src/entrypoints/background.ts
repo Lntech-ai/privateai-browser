@@ -1,10 +1,6 @@
 import { defineBackground } from "wxt/utils/define-background";
 
-import {
-  autoPairOnInstall,
-  registerOwuiBridgeHandlers,
-  restoreBridge,
-} from "@/lib/owui-bridge";
+import { registerOwuiBridgeHandlers, restoreBridge } from "@/lib/owui-bridge";
 
 /**
  * Service worker for PrivateAI Browser (OWUI reverse bridge only).
@@ -24,13 +20,7 @@ export default defineBackground(() => {
     void restoreBridge();
   });
 
-  chrome.runtime.onInstalled.addListener((details) => {
-    // install + update (chrome://extensions Reload): open OWUI and pair when
-    // nothing is stored yet. Already-paired reloads just restore the socket.
-    if (details.reason === "install" || details.reason === "update") {
-      void autoPairOnInstall();
-      return;
-    }
+  chrome.runtime.onInstalled.addListener(() => {
     void restoreBridge();
   });
 

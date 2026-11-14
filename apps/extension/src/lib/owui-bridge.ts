@@ -1,7 +1,6 @@
 import { io, type Socket } from "socket.io-client";
 
 import { handleAction, isStopped, setStopped } from "./browser-actions";
-import { getBakedOwuiBaseUrl } from "./owui-config";
 import {
   fetchSessionUser,
   openOwuiTab,
@@ -126,17 +125,17 @@ export async function connectWithToken(
 }
 
 /**
- * Open the OWUI origin (baked or explicit), wait for a browser session JWT,
- * then connect the bridge. Used on install and from the popup "Connect" button.
+ * Open the OWUI origin from user input, wait for a browser session JWT,
+ * then connect the bridge. Used from the popup "Connect" button.
  */
 export async function pairFromBrowserSession(explicitBaseUrl?: string | null): Promise<boolean> {
   if (autoPairInFlight) return autoPairInFlight;
 
   autoPairInFlight = (async () => {
     try {
-      const origin = resolveOwuiBaseUrl(explicitBaseUrl) || getBakedOwuiBaseUrl();
+      const origin = resolveOwuiBaseUrl(explicitBaseUrl);
       if (!origin) {
-        emitStatus({ error: "OWUI URL is not configured for this build" });
+        emitStatus({ error: "Enter your Open WebUI URL" });
         return false;
       }
 
@@ -180,20 +179,6 @@ export async function pairFromBrowserSession(explicitBaseUrl?: string | null): P
   })();
 
   return autoPairInFlight;
-}
-
-/** On first install (or when baked URL exists and nothing is stored), open OWUI and pair. */
-export async function autoPairOnInstall(): Promise<void> {
-  const baked = getBakedOwuiBaseUrl();
-  if (!baked) return;
-
-  const existing = await getOwuiAuth();
-  if (existing?.token) {
-    await restoreBridge();
-    return;
-  }
-
-  await pairFromBrowserSession(baked);
 }
 
 export async function disconnectBridge() {
@@ -322,7 +307,7 @@ async function handleOwuiRequest(msg: OwuiRequest): Promise<OwuiResponse> {
         // message port. Kick off pairing in this SW and acknowledge immediately.
         emitStatus({
           connecting: true,
-          baseUrl: resolveOwuiBaseUrl(msg.baseUrl) || getBakedOwuiBaseUrl() || undefined,
+          baseUrl: resolveOwuiBaseUrl(msg.baseUrl) || undefined,
           error: undefined,
         });
         void pairFromBrowserSession(msg.baseUrl);

@@ -9,25 +9,27 @@ import {
   setBridgeStopped,
   subscribeBridgeStatus,
 } from "@/lib/owui-client";
-import { getBakedOwuiBaseUrl, hasBakedOwuiBaseUrl } from "@/lib/owui-config";
 import { resumeAgents, stopAgents } from "@/lib/browser-actions";
 
-export function OwuiPanel() {
-  const bakedUrl = getBakedOwuiBaseUrl();
-  const urlLocked = hasBakedOwuiBaseUrl();
+export function OwuiPanel({
+  baseUrl,
+  onBaseUrlChange,
+}: {
+  baseUrl: string;
+  onBaseUrlChange: (url: string) => void;
+}) {
   const [status, setStatus] = useState<BridgeStatus>(getBridgeStatus());
-  const [baseUrl, setBaseUrl] = useState(status.baseUrl || bakedUrl || "http://localhost:8080");
   const [email, setEmail] = useState(status.email || "");
   const [password, setPassword] = useState("");
-  const [showPasswordForm, setShowPasswordForm] = useState(!urlLocked);
+  const [showPasswordForm, setShowPasswordForm] = useState(true);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => subscribeBridgeStatus(setStatus), []);
 
   useEffect(() => {
-    if (status.baseUrl) setBaseUrl(status.baseUrl);
+    if (status.baseUrl) onBaseUrlChange(status.baseUrl);
     if (status.email) setEmail(status.email);
-  }, [status.baseUrl, status.email]);
+  }, [status.baseUrl, status.email, onBaseUrlChange]);
 
   async function onLogin(event: React.FormEvent) {
     event.preventDefault();
@@ -47,7 +49,7 @@ export function OwuiPanel() {
     try {
       // Background opens the OWUI tab; Chrome closes this popup on focus change,
       // so pairing must not run in the popup context.
-      await pairFromBrowserSession(urlLocked ? bakedUrl : baseUrl);
+      await pairFromBrowserSession(baseUrl);
     } catch {
       // error shown via status (storage) when popup is reopened
     } finally {
@@ -86,9 +88,7 @@ export function OwuiPanel() {
               ? `Connected as ${status.email || status.name || "user"}`
               : status.connecting
                 ? "Connecting…"
-                : urlLocked
-                  ? "Connect with your PrivateAI session"
-                  : "Sign in to register this browser"}
+                : "Sign in to register this browser"}
           </div>
         </div>
         <span
@@ -107,22 +107,16 @@ export function OwuiPanel() {
 
       {!connected ? (
         <div className="space-y-2">
-          {urlLocked ? (
-            <p className="text-[10px] leading-snug text-zinc-500">
-              Server: <span className="font-medium text-zinc-700 dark:text-zinc-300">{bakedUrl}</span>
-            </p>
-          ) : (
-            <label className="block text-[11px] text-zinc-600 dark:text-zinc-400">
-              OWUI URL
-              <input
-                className="mt-0.5 w-full rounded border border-zinc-300 bg-white px-2 py-1 text-[12px] dark:border-zinc-600 dark:bg-zinc-900"
-                value={baseUrl}
-                onChange={(e) => setBaseUrl(e.target.value)}
-                placeholder="https://ai.example.com"
-                required
-              />
-            </label>
-          )}
+          <label className="block text-[11px] text-zinc-600 dark:text-zinc-400">
+            OWUI URL
+            <input
+              className="mt-0.5 w-full rounded border border-zinc-300 bg-white px-2 py-1 text-[12px] dark:border-zinc-600 dark:bg-zinc-900"
+              value={baseUrl}
+              onChange={(e) => onBaseUrlChange(e.target.value)}
+              placeholder="https://www.example.com"
+              required
+            />
+          </label>
 
           <button
             type="button"
@@ -139,9 +133,6 @@ export function OwuiPanel() {
 
           {showPasswordForm ? (
             <form className="space-y-2 border-t border-zinc-200 pt-2 dark:border-zinc-700" onSubmit={onLogin}>
-              {!urlLocked ? null : (
-                <p className="text-[10px] text-zinc-500">Or sign in with email / password</p>
-              )}
               <label className="block text-[11px] text-zinc-600 dark:text-zinc-400">
                 Email
                 <input

@@ -10,33 +10,27 @@ This extension connects **out** to your Open WebUI instance over Socket.IO, regi
 
    ```sh
    pnpm install
-   # Optional: bake the OWUI origin + instance label so users never type the URL
-   WXT_OWUI_BASE_URL=https://ai.example.com \
-   WXT_OWUI_BASE_NAME=Additon \
-     pnpm --filter @privateai/browser-extension build
+   pnpm --filter @privateai/browser-extension build
    ```
-
-   Or copy `apps/extension/.env.example` → `apps/extension/.env` and set
-   `WXT_OWUI_BASE_URL` / `WXT_OWUI_BASE_NAME`.
 
 2. Open `chrome://extensions` → Developer mode → **Load unpacked** →
    `apps/extension/.output/chrome-mv3`.
 
-3. Extension ID (stable via manifest key): `dabljdanjgbacbhfliadnoopcfaneeon`.
+3. Extension ID: development builds (`pnpm --filter @privateai/browser-extension build:dev`)
+   keep a stable ID via manifest `key` (`dabljdanjgbacbhfliadnoopcfaneeon`).
+   Chrome Web Store builds omit `key` (required by the store) and get a store-assigned ID —
+   put that ID in your OWUI CORS allowlist after publishing.
 
-4. **With a baked URL:** on first install the extension opens OWUI and pairs from your
-   existing browser session (no popup URL/password). If you are not signed in yet, sign
-   in on that tab — or use **Connect with browser session** in the popup.
-
-   **Without a baked URL:** open the popup → enter your OWUI URL → connect via session
-   or email/password.
+4. Open the popup → enter your OWUI URL → connect via browser session or email/password.
+   The popup title shows the URL you connected to.
 
 5. In OWUI chat (with native tools / builtin tools enabled), browser tools appear when the extension is **online**.
 
 ## OWUI requirements
 
 - Permission `features.browser_bridge` (default on via `USER_PERMISSIONS_FEATURES_BROWSER_BRIDGE`).
-- If `CORS_ALLOW_ORIGIN` is not `*`, allow the extension origin:
+- If `CORS_ALLOW_ORIGIN` is not `*`, allow the extension origin (dev ID shown; replace with the
+  Chrome Web Store ID after publish):
 
   ```env
   CORS_ALLOW_CUSTOM_SCHEME=chrome-extension

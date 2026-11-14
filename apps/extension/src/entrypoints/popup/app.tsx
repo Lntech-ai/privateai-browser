@@ -1,28 +1,35 @@
 import { useEffect, useState } from "react";
 
 import { OwuiPanel } from "@/components/owui-panel";
+import { PopupFooter } from "@/components/popup-footer";
 import { PopupHeader } from "@/components/popup-header";
-import { SettingsScreen } from "@/components/settings-screen";
-import { restoreBridge } from "@/lib/owui-client";
+import { getBridgeStatus, restoreBridge, subscribeBridgeStatus } from "@/lib/owui-client";
 
 /**
  * Popup: Open WebUI bridge login / status only (no local Browser MCP daemon).
  */
 export function App() {
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [baseUrl, setBaseUrl] = useState(
+    () => getBridgeStatus().baseUrl || "https://www.example.com",
+  );
 
   useEffect(() => {
     void restoreBridge();
   }, []);
 
-  if (settingsOpen) {
-    return <SettingsScreen onBack={() => setSettingsOpen(false)} />;
-  }
+  useEffect(
+    () =>
+      subscribeBridgeStatus((status) => {
+        if (status.baseUrl) setBaseUrl(status.baseUrl);
+      }),
+    [],
+  );
 
   return (
     <div className="w-80 text-[13px]">
-      <PopupHeader onOpenSettings={() => setSettingsOpen(true)} />
-      <OwuiPanel />
+      <PopupHeader baseUrl={baseUrl} />
+      <OwuiPanel baseUrl={baseUrl} onBaseUrlChange={setBaseUrl} />
+      <PopupFooter />
     </div>
   );
 }

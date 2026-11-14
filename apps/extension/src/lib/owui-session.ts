@@ -1,4 +1,3 @@
-import { getBakedOwuiBaseUrl } from "./owui-config";
 import { normalizeBaseUrl } from "./owui-storage";
 
 export type OwuiSessionUser = {
@@ -144,14 +143,12 @@ export async function waitForTokenInTab(
   });
 }
 
-/** Resolve which OWUI origin to use: baked build URL, else explicit, else null. */
+/** Normalize an explicit OWUI origin from user input; null if missing/invalid. */
 export function resolveOwuiBaseUrl(explicit?: string | null): string | null {
-  if (explicit?.trim()) {
-    try {
-      return normalizeBaseUrl(explicit);
-    } catch {
-      return null;
-    }
+  if (!explicit?.trim()) return null;
+  try {
+    return normalizeBaseUrl(explicit);
+  } catch {
+    return null;
   }
-  return getBakedOwuiBaseUrl();
 }
