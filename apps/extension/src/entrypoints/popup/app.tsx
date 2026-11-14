@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { OwuiPanel } from "@/components/owui-panel";
 import { PopupHeader } from "@/components/popup-header";
 import { SettingsScreen } from "@/components/settings-screen";
-import { restoreBridge } from "@/lib/owui-bridge";
+import { restoreBridge } from "@/lib/owui-client";
 
 /**
  * Popup: Open WebUI bridge login / status only (no local Browser MCP daemon).

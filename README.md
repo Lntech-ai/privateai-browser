@@ -10,15 +10,26 @@ This extension connects **out** to your Open WebUI instance over Socket.IO, regi
 
    ```sh
    pnpm install
-   pnpm --filter @privateai/browser-extension build
+   # Optional: bake the OWUI origin + instance label so users never type the URL
+   WXT_OWUI_BASE_URL=https://ai.example.com \
+   WXT_OWUI_BASE_NAME=Additon \
+     pnpm --filter @privateai/browser-extension build
    ```
+
+   Or copy `apps/extension/.env.example` → `apps/extension/.env` and set
+   `WXT_OWUI_BASE_URL` / `WXT_OWUI_BASE_NAME`.
 
 2. Open `chrome://extensions` → Developer mode → **Load unpacked** →
    `apps/extension/.output/chrome-mv3`.
 
 3. Extension ID (stable via manifest key): `dabljdanjgbacbhfliadnoopcfaneeon`.
 
-4. Open the popup → enter your OWUI URL → sign in with email/password.
+4. **With a baked URL:** on first install the extension opens OWUI and pairs from your
+   existing browser session (no popup URL/password). If you are not signed in yet, sign
+   in on that tab — or use **Connect with browser session** in the popup.
+
+   **Without a baked URL:** open the popup → enter your OWUI URL → connect via session
+   or email/password.
 
 5. In OWUI chat (with native tools / builtin tools enabled), browser tools appear when the extension is **online**.
 
