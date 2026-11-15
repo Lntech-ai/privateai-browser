@@ -118,13 +118,13 @@ export function OwuiPanel({
       ) : null}
 
       <label className="block text-[11px] text-zinc-600 dark:text-zinc-400">
-        Browser name
+        Device name
         <input
           className="mt-0.5 w-full rounded border border-zinc-300 bg-white px-2 py-1 text-[12px] dark:border-zinc-600 dark:bg-zinc-900"
           value={deviceName}
           onChange={(e) => setDeviceNameInput(e.target.value)}
           onBlur={() => void persistDeviceName()}
-          placeholder="e.g. MacBook Chrome"
+          placeholder="e.g. Office PC"
           maxLength={64}
         />
       </label>
@@ -145,7 +145,7 @@ export function OwuiPanel({
               className="mt-0.5 w-full rounded border border-zinc-300 bg-white px-2 py-1 text-[12px] dark:border-zinc-600 dark:bg-zinc-900"
               value={baseUrl}
               onChange={(e) => onBaseUrlChange(e.target.value)}
-              placeholder="https://www.example.com"
+              placeholder="https://example.com"
               required
             />
           </label>

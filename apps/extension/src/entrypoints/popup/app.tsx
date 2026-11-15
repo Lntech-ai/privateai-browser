@@ -9,9 +9,7 @@ import { getBridgeStatus, restoreBridge, subscribeBridgeStatus } from "@/lib/owu
  * Popup: Open WebUI bridge login / status only (no local Browser MCP daemon).
  */
 export function App() {
-  const [baseUrl, setBaseUrl] = useState(
-    () => getBridgeStatus().baseUrl || "https://www.example.com",
-  );
+  const [baseUrl, setBaseUrl] = useState(() => getBridgeStatus().baseUrl || "");
 
   useEffect(() => {
     void restoreBridge();
