@@ -8,6 +8,7 @@ import {
   waitForTokenInTab,
 } from "./owui-session";
 import { isOwuiRequest, OWUI_STATUS_KEY, type OwuiRequest, type OwuiResponse } from "./owui-messages";
+import { getOwuiDevice, setOwuiDeviceName } from "./owui-device";
 import {
   clearOwuiAuth,
   getOwuiAuth,
@@ -22,6 +23,8 @@ export type BridgeStatus = {
   baseUrl?: string;
   email?: string;
   name?: string;
+  deviceId?: string;
+  deviceName?: string;
   paired?: boolean;
   stopped: boolean;
   error?: string;
@@ -54,6 +57,15 @@ export function getBridgeStatus() {
   return status;
 }
 
+async function withDevice(auth: OwuiStoredAuth): Promise<OwuiStoredAuth> {
+  const device = await getOwuiDevice();
+  return {
+    ...auth,
+    deviceId: device.id,
+    deviceName: device.name,
+  };
+}
+
 async function signIn(baseUrl: string, email: string, password: string) {
   const origin = normalizeBaseUrl(baseUrl);
   const res = await fetch(`${origin}/api/v1/auths/signin`, {
@@ -67,14 +79,14 @@ async function signIn(baseUrl: string, email: string, password: string) {
   }
   const token = body.token as string | undefined;
   if (!token) throw new Error("Sign-in response missing token");
-  const auth: OwuiStoredAuth = {
+  const auth = await withDevice({
     baseUrl: origin,
     token,
     email: body.email || email,
     name: body.name,
     allowedOrigin: origin,
     pairedAt: Date.now(),
-  };
+  });
   await setOwuiAuth(auth);
   return auth;
 }
@@ -104,14 +116,14 @@ export async function connectWithToken(
   try {
     const origin = normalizeBaseUrl(baseUrl);
     const session = await fetchSessionUser(origin, token);
-    const auth: OwuiStoredAuth = {
+    const auth = await withDevice({
       baseUrl: origin,
       token: session.token,
       email: session.email || profile?.email,
       name: session.name || profile?.name,
       allowedOrigin: origin,
       pairedAt: Date.now(),
-    };
+    });
     await setOwuiAuth(auth);
     await connectSocket(auth);
   } catch (error) {
@@ -187,6 +199,7 @@ export async function disconnectBridge() {
     socket.disconnect();
     socket = null;
   }
+  const device = await getOwuiDevice();
   await clearOwuiAuth();
   emitStatus({
     connected: false,
@@ -194,6 +207,8 @@ export async function disconnectBridge() {
     baseUrl: undefined,
     email: undefined,
     name: undefined,
+    deviceId: device.id,
+    deviceName: device.name,
     paired: false,
     error: undefined,
   });
@@ -201,17 +216,30 @@ export async function disconnectBridge() {
 
 export async function restoreBridge() {
   const auth = await getOwuiAuth();
-  if (!auth?.token || !auth.baseUrl) return;
+  const device = await getOwuiDevice();
+  if (!auth?.token || !auth.baseUrl) {
+    emitStatus({
+      deviceId: device.id,
+      deviceName: device.name,
+    });
+    return;
+  }
   setStopped(!!auth.stopped);
+  const withIds = await withDevice(auth);
+  if (withIds.deviceId !== auth.deviceId || withIds.deviceName !== auth.deviceName) {
+    await setOwuiAuth(withIds);
+  }
   emitStatus({
     connecting: true,
-    baseUrl: auth.baseUrl,
-    email: auth.email,
-    name: auth.name,
-    paired: !!auth.pairedAt,
+    baseUrl: withIds.baseUrl,
+    email: withIds.email,
+    name: withIds.name,
+    deviceId: withIds.deviceId,
+    deviceName: withIds.deviceName,
+    paired: !!withIds.pairedAt,
   });
   try {
-    await connectSocket(auth);
+    await connectSocket(withIds);
   } catch (error) {
     emitStatus({
       connecting: false,
@@ -221,6 +249,20 @@ export async function restoreBridge() {
   }
 }
 
+export async function updateDeviceName(name: string) {
+  const device = await setOwuiDeviceName(name);
+  const auth = await getOwuiAuth();
+  if (auth) {
+    await setOwuiAuth({ ...auth, deviceId: device.id, deviceName: device.name });
+  }
+  emitStatus({ deviceId: device.id, deviceName: device.name });
+  // Reconnect so OWUI picks up the new label while keeping the same id.
+  if (auth?.token && auth.baseUrl && status.connected) {
+    await connectSocket({ ...auth, deviceId: device.id, deviceName: device.name });
+  }
+  return device;
+}
+
 async function connectSocket(auth: OwuiStoredAuth) {
   if (socket) {
     socket.removeAllListeners();
@@ -228,11 +270,17 @@ async function connectSocket(auth: OwuiStoredAuth) {
     socket = null;
   }
 
+  const device = await getOwuiDevice();
+  const deviceId = auth.deviceId || device.id;
+  const deviceName = auth.deviceName || device.name;
+
   emitStatus({
     connecting: true,
     baseUrl: auth.baseUrl,
     email: auth.email,
     name: auth.name,
+    deviceId,
+    deviceName,
     paired: !!auth.pairedAt,
     error: undefined,
   });
@@ -243,6 +291,8 @@ async function connectSocket(auth: OwuiStoredAuth) {
     auth: {
       token: auth.token,
       client_type: "browser_bridge",
+      client_id: deviceId,
+      client_name: deviceName,
     },
     reconnection: true,
     reconnectionDelay: 1500,
@@ -252,7 +302,13 @@ async function connectSocket(auth: OwuiStoredAuth) {
   socket = next;
 
   next.on("connect", () => {
-    emitStatus({ connected: true, connecting: false, error: undefined });
+    emitStatus({
+      connected: true,
+      connecting: false,
+      error: undefined,
+      deviceId,
+      deviceName,
+    });
   });
 
   next.on("disconnect", () => {
@@ -321,6 +377,9 @@ async function handleOwuiRequest(msg: OwuiRequest): Promise<OwuiResponse> {
         return { ok: true, status: getBridgeStatus() };
       case "owui/setStopped":
         await setBridgeStopped(msg.value);
+        return { ok: true, status: getBridgeStatus() };
+      case "owui/setDeviceName":
+        await updateDeviceName(msg.name);
         return { ok: true, status: getBridgeStatus() };
       case "owui/restore":
         await restoreBridge();

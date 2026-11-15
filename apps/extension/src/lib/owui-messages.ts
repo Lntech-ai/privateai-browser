@@ -8,6 +8,7 @@ export type OwuiRequest =
   | { type: "owui/login"; baseUrl: string; email: string; password: string }
   | { type: "owui/disconnect" }
   | { type: "owui/setStopped"; value: boolean }
+  | { type: "owui/setDeviceName"; name: string }
   | { type: "owui/restore" };
 
 export type OwuiResponse =

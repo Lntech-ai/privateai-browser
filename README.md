@@ -21,7 +21,9 @@ This extension connects **out** to your Open WebUI instance over Socket.IO, regi
    Chrome Web Store builds omit `key` (required by the store) and get a store-assigned ID —
    put that ID in your OWUI CORS allowlist after publishing.
 
-4. Open the popup → enter your OWUI URL → connect via browser session or email/password.
+4. Open the popup → set a **Browser name** (label) → enter your OWUI URL → connect via
+   browser session or email/password. Each install also has a unique **ID**; OWUI can keep
+   multiple extensions online under the same account and target one by id or name.
    The popup title shows the URL you connected to.
 
 5. In OWUI chat (with native tools / builtin tools enabled), browser tools appear when the extension is **online**.

@@ -2,10 +2,15 @@ export type OwuiStoredAuth = {
   baseUrl: string;
   token: string;
   email?: string;
+  /** OWUI user display name (not the browser device label). */
   name?: string;
   allowedOrigin?: string;
   pairedAt?: number;
   stopped?: boolean;
+  /** Stable install id sent to OWUI as client_id. */
+  deviceId?: string;
+  /** User-editable browser label sent to OWUI as client_name. */
+  deviceName?: string;
 };
 
 const KEY = "privateai_owui";

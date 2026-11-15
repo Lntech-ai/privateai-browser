@@ -7,6 +7,7 @@ import {
   loginAndConnect,
   pairFromBrowserSession,
   setBridgeStopped,
+  setDeviceName,
   subscribeBridgeStatus,
 } from "@/lib/owui-client";
 import { resumeAgents, stopAgents } from "@/lib/browser-actions";
@@ -21,6 +22,7 @@ export function OwuiPanel({
   const [status, setStatus] = useState<BridgeStatus>(getBridgeStatus());
   const [email, setEmail] = useState(status.email || "");
   const [password, setPassword] = useState("");
+  const [deviceName, setDeviceNameInput] = useState(status.deviceName || "");
   const [showPasswordForm, setShowPasswordForm] = useState(true);
   const [busy, setBusy] = useState(false);
 
@@ -29,12 +31,20 @@ export function OwuiPanel({
   useEffect(() => {
     if (status.baseUrl) onBaseUrlChange(status.baseUrl);
     if (status.email) setEmail(status.email);
-  }, [status.baseUrl, status.email, onBaseUrlChange]);
+    if (status.deviceName) setDeviceNameInput(status.deviceName);
+  }, [status.baseUrl, status.email, status.deviceName, onBaseUrlChange]);
+
+  async function persistDeviceName() {
+    const next = deviceName.trim();
+    if (!next || next === status.deviceName) return;
+    await setDeviceName(next);
+  }
 
   async function onLogin(event: React.FormEvent) {
     event.preventDefault();
     setBusy(true);
     try {
+      await persistDeviceName();
       await loginAndConnect(baseUrl, email, password);
       setPassword("");
     } catch {
@@ -47,6 +57,7 @@ export function OwuiPanel({
   async function onConnectSession() {
     setBusy(true);
     try {
+      await persistDeviceName();
       // Background opens the OWUI tab; Chrome closes this popup on focus change,
       // so pairing must not run in the popup context.
       await pairFromBrowserSession(baseUrl);
@@ -77,6 +88,7 @@ export function OwuiPanel({
   }
 
   const connected = status.connected;
+  const shortId = status.deviceId ? status.deviceId.slice(0, 8) : "";
 
   return (
     <div className="space-y-3 border-t border-zinc-200 px-3 py-3 dark:border-zinc-700">
@@ -103,6 +115,26 @@ export function OwuiPanel({
         <div className="rounded bg-red-50 px-2 py-1 text-[11px] text-red-700 dark:bg-red-950/40 dark:text-red-300">
           {status.error}
         </div>
+      ) : null}
+
+      <label className="block text-[11px] text-zinc-600 dark:text-zinc-400">
+        Browser name
+        <input
+          className="mt-0.5 w-full rounded border border-zinc-300 bg-white px-2 py-1 text-[12px] dark:border-zinc-600 dark:bg-zinc-900"
+          value={deviceName}
+          onChange={(e) => setDeviceNameInput(e.target.value)}
+          onBlur={() => void persistDeviceName()}
+          placeholder="e.g. MacBook Chrome"
+          maxLength={64}
+        />
+      </label>
+      {shortId ? (
+        <p className="text-[10px] leading-snug text-zinc-500" title={status.deviceId}>
+          ID: <span className="font-mono text-zinc-600 dark:text-zinc-400">{shortId}…</span>
+          {connected && status.deviceName
+            ? ` · shown in OWUI as “${status.deviceName}”`
+            : " · unique per install even if names match"}
+        </p>
       ) : null}
 
       {!connected ? (

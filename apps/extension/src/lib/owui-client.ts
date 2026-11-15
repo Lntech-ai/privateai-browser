@@ -91,6 +91,11 @@ export async function setBridgeStopped(value: boolean) {
   if (!res.ok) throw new Error(res.error || "Failed to update stop state");
 }
 
+export async function setDeviceName(name: string) {
+  const res = await send({ type: "owui/setDeviceName", name });
+  if (!res.ok) throw new Error(res.error || "Failed to update browser name");
+}
+
 export async function restoreBridge() {
   await send({ type: "owui/restore" });
 }

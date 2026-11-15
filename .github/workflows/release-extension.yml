@@ -1,0 +1,62 @@
+name: Release extension
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-extension-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up pnpm and Node
+        uses: pnpm/setup@v3
+        with:
+          cache: true
+          require-lockfile: true
+
+      - name: Read extension version
+        id: meta
+        run: |
+          VERSION="$(node -p "require('./apps/extension/package.json').version")"
+          SHORT_SHA="$(echo "${GITHUB_SHA}" | cut -c1-7)"
+          TAG="extension-v${VERSION}-${SHORT_SHA}"
+          ZIP_NAME="privateai-browser-extension-${VERSION}-chrome.zip"
+          {
+            echo "version=${VERSION}"
+            echo "tag=${TAG}"
+            echo "zip_name=${ZIP_NAME}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build Chrome Web Store zip
+        run: pnpm --filter @privateai/browser-extension zip
+
+      - name: Rename zip for release
+        run: |
+          SRC="$(ls apps/extension/.output/*-chrome.zip | head -n1)"
+          cp "$SRC" "apps/extension/.output/${{ steps.meta.outputs.zip_name }}"
+          ls -lh apps/extension/.output/*.zip
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: PrivateAI Browser ${{ steps.meta.outputs.version }} (${{ steps.meta.outputs.tag }})
+          body: |
+            Chrome extension package for PrivateAI Browser / Open WebUI bridge.
+
+            - Version: `${{ steps.meta.outputs.version }}`
+            - Commit: `${{ github.sha }}`
+            - Upload `${{ steps.meta.outputs.zip_name }}` to the Chrome Web Store (no manifest `key`).
+          files: apps/extension/.output/${{ steps.meta.outputs.zip_name }}
+          make_latest: true
+          fail_on_unmatched_files: true
