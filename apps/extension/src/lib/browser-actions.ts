@@ -442,7 +442,7 @@ export async function resumeAgents() {
   return { ok: true, stopped: false };
 }
 
-/** Hosts OWUI may read cookies from / fetch / listen on (never arbitrary sites). */
+/** Hosts OWUI may fetch / listen on (never arbitrary sites). Auth via in-tab credentials only. */
 export const BRIDGE_HOST_ALLOWLIST = new Set(["kalodata.com", "www.kalodata.com"]);
 
 const FETCH_BODY_MAX_BYTES = 1_500_000;
@@ -496,19 +496,6 @@ export function isAllowedHost(hostname: string): boolean {
     if (host === allowed || host.endsWith(`.${allowed}`)) return true;
   }
   return false;
-}
-
-export function assertCookieDomain(domain: string): string {
-  const cleaned = String(domain || "")
-    .trim()
-    .toLowerCase()
-    .replace(/^\.+/, "");
-  if (!cleaned || !isAllowedHost(cleaned)) {
-    throw new Error(
-      `Cookie domain not allowed: ${domain}. Allowlist: ${[...BRIDGE_HOST_ALLOWLIST].join(", ")}`,
-    );
-  }
-  return cleaned;
 }
 
 /** https-only URL whose host is on the bridge allowlist. */
@@ -637,77 +624,6 @@ async function onNetworkDebuggerEvent(
   }
 }
 
-/**
- * Collect cookies for an allowlisted host.
- * Must use `url` lookups — `domain` filters omit host-only cookies (common for SESSION).
- * Also walks every cookie store and partitioned jars (CHIPS).
- */
-export async function collectCookiesForHost(hostname: string): Promise<chrome.cookies.Cookie[]> {
-  const host = assertCookieDomain(hostname);
-  const bare = host.replace(/^www\./, "");
-  const urlCandidates = [
-    `https://${host}/`,
-    `https://www.${bare}/`,
-    `https://${bare}/`,
-    `https://www.${bare}/explore`,
-  ];
-  const byKey = new Map<string, chrome.cookies.Cookie>();
-
-  const storeIds: (string | undefined)[] = [undefined];
-  try {
-    const stores = await chrome.cookies.getAllCookieStores();
-    for (const s of stores || []) {
-      if (s?.id) storeIds.push(s.id);
-    }
-  } catch {
-    // older Chromium
-  }
-
-  const partitionKeys: (chrome.cookies.CookiePartitionKey | undefined)[] = [
-    undefined,
-    { topLevelSite: `https://www.${bare}` },
-    { topLevelSite: `https://${bare}` },
-  ];
-
-  const ingest = (list: chrome.cookies.Cookie[]) => {
-    for (const c of list) {
-      byKey.set(`${c.name}\0${c.domain}\0${c.path}\0${(c as any).partitionKey || ""}`, c);
-    }
-  };
-
-  for (const url of urlCandidates) {
-    try {
-      assertAllowedUrl(url);
-    } catch {
-      continue;
-    }
-    for (const storeId of storeIds) {
-      for (const partitionKey of partitionKeys) {
-        try {
-          const query: chrome.cookies.GetAllDetails = { url };
-          if (storeId) query.storeId = storeId;
-          if (partitionKey) (query as any).partitionKey = partitionKey;
-          ingest(await chrome.cookies.getAll(query));
-        } catch {
-          // ignore per-query failures
-        }
-      }
-    }
-  }
-  for (const domain of [bare, `.${bare}`, `www.${bare}`]) {
-    for (const storeId of storeIds) {
-      try {
-        const query: chrome.cookies.GetAllDetails = { domain };
-        if (storeId) query.storeId = storeId;
-        ingest(await chrome.cookies.getAll(query));
-      } catch {
-        // ignore
-      }
-    }
-  }
-  return [...byKey.values()];
-}
-
 async function waitForTabComplete(tabId: number, timeoutMs = 15_000): Promise<void> {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
@@ -755,68 +671,6 @@ export async function ensureBackgroundTab(url: string): Promise<{
   await ensureAgentGroup(tabId);
   await waitForTabComplete(tabId);
   return { tabId, created: true, url: href };
-}
-
-/**
- * Read allowlisted site cookies (e.g. Kalodata SESSION) for OWUI tools.
- * Uses chrome.cookies — not CDP Network.getCookies (blocked by policy).
- */
-export async function getCookies(params: {
-  domain?: string;
-  names?: string[];
-  /** Open this allowlisted URL in a background tab before reading cookies. */
-  ensure_url?: string;
-} = {}) {
-  assertNotStopped();
-  const domain = assertCookieDomain(params.domain || "kalodata.com");
-  const names = Array.isArray(params.names)
-    ? params.names.map((n) => String(n)).filter(Boolean)
-    : [];
-
-  let ensured: { tabId: number; created: boolean; url: string } | undefined;
-  const ensureUrl =
-    params.ensure_url ||
-    (domain.includes("kalodata") ? "https://www.kalodata.com/explore" : "");
-  if (ensureUrl) {
-    try {
-      ensured = await ensureBackgroundTab(ensureUrl);
-    } catch {
-      // cookie read can still succeed without a tab
-    }
-  }
-
-  const all = await collectCookiesForHost(domain);
-  const filtered = names.length
-    ? all.filter((c) => names.includes(c.name))
-    : all;
-  // Prefer SESSION even when other cookies exist and names filter was empty.
-  const ordered =
-    names.length || !filtered.some((c) => c.name === "SESSION")
-      ? filtered
-      : [
-          ...filtered.filter((c) => c.name === "SESSION"),
-          ...filtered.filter((c) => c.name !== "SESSION"),
-        ];
-  const cookies = ordered.map((c) => ({
-    name: c.name,
-    value: c.value,
-    domain: c.domain,
-    path: c.path,
-    secure: c.secure,
-    httpOnly: c.httpOnly,
-    expirationDate: c.expirationDate,
-  }));
-  const cookie = cookies.map((c) => `${c.name}=${c.value}`).join("; ");
-  return {
-    ok: true,
-    domain,
-    cookies,
-    cookie,
-    cookie_header: cookie,
-    ensured_url: ensured?.url,
-    ensured_tab_id: ensured?.tabId,
-    ensured_created: ensured?.created,
-  };
 }
 
 /** In-tab fetch with the page's live cookie jar (incl. httpOnly). No focus steal. */
@@ -910,8 +764,8 @@ async function fetchInPageTab(
 
 /**
  * Authenticated fetch for allowlisted https URLs.
- * Prefer in-page fetch on a background kalodata tab (live session cookies).
- * Fall back to service-worker fetch with chrome.cookies Cookie header.
+ * Runs in a background allowlisted tab so the page's live session credentials apply.
+ * Never reads or copies cookies into the service worker.
  */
 export async function bridgeFetch(params: {
   url?: string;
@@ -941,124 +795,19 @@ export async function bridgeFetch(params: {
     }
   }
 
-  // Prefer the live tab session — does not require copying Cookie into the SW.
-  let pageError: string | undefined;
-  try {
-    const explore =
-      parsed.hostname.includes("kalodata")
-        ? "https://www.kalodata.com/explore"
-        : `${parsed.origin}/`;
-    const ensured = await ensureBackgroundTab(explore);
-    const pageResult = await fetchInPageTab(
-      ensured.tabId,
-      parsed.href,
-      method,
-      headers,
-      body,
-      timeoutMs,
-    );
-    if (pageResult.ok || (typeof pageResult.status === "number" && pageResult.status > 0)) {
-      return pageResult;
-    }
-    pageError = String(pageResult.error || `page fetch status ${pageResult.status}`);
-  } catch (err) {
-    pageError = err instanceof Error ? err.message : String(err);
-  }
-
-  const allCookies = await collectCookiesForHost(parsed.hostname);
-  const cookieHeader = allCookies.map((c) => `${c.name}=${c.value}`).join("; ");
-  if (cookieHeader) headers.Cookie = cookieHeader;
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(parsed.href, {
-      method,
-      headers,
-      body,
-      signal: controller.signal,
-      credentials: "omit",
-      redirect: "manual",
-    });
-    if (res.type === "opaqueredirect" || (res.status >= 300 && res.status < 400)) {
-      const location = res.headers.get("Location") || res.url || "";
-      if (location) {
-        try {
-          assertAllowedUrl(new URL(location, parsed.href).href);
-        } catch {
-          return {
-            ok: false,
-            status: res.status,
-            error: `Redirect target not allowlisted: ${location}`,
-            via: "service_worker",
-            page_error: pageError,
-          };
-        }
-      }
-      return {
-        ok: false,
-        status: res.status,
-        error: `HTTP redirect not followed (${res.status}). Bridge fetch does not auto-follow redirects.`,
-        via: "service_worker",
-        page_error: pageError,
-      };
-    }
-    try {
-      assertAllowedUrl(res.url || parsed.href);
-    } catch {
-      return {
-        ok: false,
-        status: res.status,
-        error: `Final response URL not allowlisted: ${res.url}`,
-        via: "service_worker",
-        page_error: pageError,
-      };
-    }
-    const raw = await res.arrayBuffer();
-    let truncated = false;
-    let bytes = new Uint8Array(raw);
-    if (bytes.byteLength > FETCH_BODY_MAX_BYTES) {
-      bytes = bytes.slice(0, FETCH_BODY_MAX_BYTES);
-      truncated = true;
-    }
-    const body_text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
-    let json: unknown;
-    const ct = res.headers.get("content-type") || "";
-    if (ct.includes("json") || /^\s*[\[{]/.test(body_text)) {
-      try {
-        json = JSON.parse(body_text);
-      } catch {
-        json = undefined;
-      }
-    }
-    const responseHeaders: Record<string, string> = {};
-    res.headers.forEach((v, k) => {
-      responseHeaders[k] = v;
-    });
-    return {
-      ok: res.ok,
-      status: res.status,
-      headers: responseHeaders,
-      body_text,
-      body_truncated: truncated,
-      ...(json !== undefined ? { json } : {}),
-      via: "service_worker",
-      cookie_count: allCookies.length,
-      page_error: pageError,
-    };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return {
-      ok: false,
-      error: message,
-      status: 0,
-      via: "service_worker",
-      cookie_count: allCookies.length,
-      page_error: pageError,
-    };
-  } finally {
-    clearTimeout(timer);
-  }
+  const explore =
+    parsed.hostname.includes("kalodata")
+      ? "https://www.kalodata.com/explore"
+      : `${parsed.origin}/`;
+  const ensured = await ensureBackgroundTab(explore);
+  return fetchInPageTab(
+    ensured.tabId,
+    parsed.href,
+    method,
+    headers,
+    body,
+    timeoutMs,
+  );
 }
 
 export async function networkListen(params: { enabled?: boolean } = {}) {
@@ -1146,7 +895,6 @@ const BRIDGE_ACTIONS = [
   "tab_close",
   "click",
   "type",
-  "get_cookies",
   "fetch",
   "network_listen",
   "network_log",
@@ -1163,7 +911,6 @@ export async function bridgeCapabilities() {
     actions: [...BRIDGE_ACTIONS],
     supports: {
       fetch: true,
-      get_cookies: true,
       network_listen: true,
       in_page_fetch: true,
     },
@@ -1199,10 +946,6 @@ export async function handleAction(action: string, params: Record<string, unknow
           text?: string;
           submit?: boolean;
         },
-      );
-    case "get_cookies":
-      return getCookies(
-        params as { domain?: string; names?: string[]; ensure_url?: string },
       );
     case "fetch":
       return bridgeFetch(

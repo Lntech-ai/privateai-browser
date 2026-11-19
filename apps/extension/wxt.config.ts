@@ -29,7 +29,6 @@ export default defineConfig({
     host_permissions: ["<all_urls>"],
     permissions: [
       "alarms",
-      "cookies",
       "debugger",
       "scripting",
       "storage",
