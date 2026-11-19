@@ -435,6 +435,52 @@ export async function resumeAgents() {
   return { ok: true, stopped: false };
 }
 
+/** Domains OWUI may ask for cookies from (never arbitrary sites). */
+const COOKIE_DOMAIN_ALLOWLIST = new Set(["kalodata.com", "www.kalodata.com"]);
+
+function assertCookieDomain(domain: string): string {
+  const cleaned = String(domain || "")
+    .trim()
+    .toLowerCase()
+    .replace(/^\.+/, "");
+  if (!cleaned || !COOKIE_DOMAIN_ALLOWLIST.has(cleaned)) {
+    throw new Error(
+      `Cookie domain not allowed: ${domain}. Allowlist: ${[...COOKIE_DOMAIN_ALLOWLIST].join(", ")}`,
+    );
+  }
+  return cleaned;
+}
+
+/**
+ * Read allowlisted site cookies (e.g. Kalodata SESSION) for OWUI tools.
+ * Uses chrome.cookies — not CDP Network.getCookies (blocked by policy).
+ */
+export async function getCookies(params: {
+  domain?: string;
+  names?: string[];
+} = {}) {
+  assertNotStopped();
+  const domain = assertCookieDomain(params.domain || "kalodata.com");
+  const names = Array.isArray(params.names)
+    ? params.names.map((n) => String(n)).filter(Boolean)
+    : [];
+  const all = await chrome.cookies.getAll({ domain });
+  const filtered = names.length
+    ? all.filter((c) => names.includes(c.name))
+    : all;
+  const cookies = filtered.map((c) => ({
+    name: c.name,
+    value: c.value,
+    domain: c.domain,
+    path: c.path,
+    secure: c.secure,
+    httpOnly: c.httpOnly,
+    expirationDate: c.expirationDate,
+  }));
+  const cookie = cookies.map((c) => `${c.name}=${c.value}`).join("; ");
+  return { ok: true, domain, cookies, cookie, cookie_header: cookie };
+}
+
 export async function handleAction(action: string, params: Record<string, unknown> = {}) {
   switch (action) {
     case "navigate":
@@ -461,6 +507,8 @@ export async function handleAction(action: string, params: Record<string, unknow
           submit?: boolean;
         },
       );
+    case "get_cookies":
+      return getCookies(params as { domain?: string; names?: string[] });
     case "stop":
       return stopAgents();
     case "resume":
