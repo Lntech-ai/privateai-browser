@@ -9,6 +9,6 @@ export const DOCS_URL = "https://github.com/Lntech-ai/privateai-browser#readme";
 /** Upstream Browser MCP docs (local daemon path) */
 export const UPDATE_SERVER_URL = "https://browsermcp.io/#update";
 
-/** How to update this fork */
+/** Chrome Web Store listing */
 export const UPDATE_EXTENSION_URL =
-  "https://github.com/Lntech-ai/privateai-browser#install-load-unpacked";
+  "https://chromewebstore.google.com/detail/privateai-browser/bknhphccokmmlbjcmlnnlanpcoebhfbp";
