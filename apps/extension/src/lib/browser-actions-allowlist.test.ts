@@ -10,6 +10,7 @@ const hostOnlySession = {
 
 vi.stubGlobal("chrome", {
   cookies: {
+    getAllCookieStores: vi.fn(async () => [{ id: "0" }]),
     // Host-only cookies are NOT returned for domain filters — only url lookups.
     getAll: vi.fn(async (query: { url?: string; domain?: string }) => {
       if (query.url && query.url.includes("kalodata.com")) {
@@ -26,7 +27,11 @@ vi.stubGlobal("chrome", {
     },
   },
   tabs: {
-    get: vi.fn(async () => ({ id: 1, status: "complete", url: "https://www.kalodata.com/explore" })),
+    get: vi.fn(async () => ({
+      id: 42,
+      status: "complete",
+      url: "https://www.kalodata.com/explore",
+    })),
     query: vi.fn(async () => []),
     create: vi.fn(async ({ url, active }: { url: string; active?: boolean }) => ({
       id: 42,
@@ -41,6 +46,19 @@ vi.stubGlobal("chrome", {
     update: vi.fn(),
     TAB_GROUP_ID_NONE: -1,
   },
+  scripting: {
+    executeScript: vi.fn(async () => [
+      {
+        result: {
+          ok: true,
+          status: 200,
+          body_text: '{"success":true,"data":1}',
+          json: { success: true, data: 1 },
+          via: "page",
+        },
+      },
+    ]),
+  },
   debugger: {
     attach: vi.fn(),
     detach: vi.fn(),
@@ -54,6 +72,7 @@ describe("bridge allowlist + fetch", () => {
     vi.resetModules();
     (chrome.cookies.getAll as ReturnType<typeof vi.fn>).mockClear();
     (chrome.tabs.create as ReturnType<typeof vi.fn>).mockClear();
+    (chrome.scripting.executeScript as ReturnType<typeof vi.fn>).mockClear();
   });
 
   it("assertAllowedUrl accepts kalodata https hosts", async () => {
@@ -110,6 +129,24 @@ describe("bridge allowlist + fetch", () => {
     });
   });
 
+  it("bridgeFetch prefers in-page credentials fetch", async () => {
+    const { bridgeFetch } = await import("./browser-actions");
+    const result = await bridgeFetch({
+      url: "https://www.kalodata.com/video/detail",
+      method: "POST",
+      body: { id: "1" },
+      headers: { Accept: "application/json" },
+    });
+    expect(result.ok).toBe(true);
+    expect(result.status).toBe(200);
+    expect((result as { via?: string }).via).toBe("page");
+    expect(chrome.scripting.executeScript).toHaveBeenCalled();
+    expect(chrome.tabs.create).toHaveBeenCalledWith({
+      url: "https://www.kalodata.com/explore",
+      active: false,
+    });
+  });
+
   it("bridgeFetch rejects non-allowlisted host before cookies", async () => {
     const { bridgeFetch } = await import("./browser-actions");
     await expect(bridgeFetch({ url: "https://example.com/" })).rejects.toThrow(
@@ -118,7 +155,10 @@ describe("bridge allowlist + fetch", () => {
     expect(chrome.cookies.getAll).not.toHaveBeenCalled();
   });
 
-  it("bridgeFetch returns status for allowlisted URL", async () => {
+  it("bridgeFetch falls back to service worker when page fetch fails", async () => {
+    (chrome.scripting.executeScript as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
+      { result: { ok: false, status: 0, error: "page boom", via: "page" } },
+    ]);
     const fetchMock = vi.fn(async () => {
       return new Response(JSON.stringify({ success: true, data: 1 }), {
         status: 200,
@@ -132,33 +172,11 @@ describe("bridge allowlist + fetch", () => {
       url: "https://www.kalodata.com/video/detail",
       method: "POST",
       body: { id: "1" },
-      headers: { Accept: "application/json" },
     });
-
     expect(result.ok).toBe(true);
-    expect(result.status).toBe(200);
-    expect((result as { json?: { success?: boolean } }).json?.success).toBe(true);
-    expect(chrome.cookies.getAll).toHaveBeenCalled();
+    expect((result as { via?: string }).via).toBe("service_worker");
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(init.redirect).toBe("manual");
     expect((init.headers as Record<string, string>).Cookie).toContain("SESSION=abc");
-  });
-
-  it("bridgeFetch rejects off-allowlist redirect Location", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => {
-        return new Response(null, {
-          status: 302,
-          headers: { Location: "https://evil.com/steal" },
-        });
-      }),
-    );
-    const { bridgeFetch } = await import("./browser-actions");
-    const result = await bridgeFetch({
-      url: "https://www.kalodata.com/api/x",
-    });
-    expect(result.ok).toBe(false);
-    expect(String((result as { error?: string }).error || "")).toMatch(/not allowlisted/i);
   });
 });

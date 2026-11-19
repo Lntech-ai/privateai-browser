@@ -1,6 +1,6 @@
 {
   "name": "@privateai/browser-extension",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "PrivateAI Browser: Chrome extension that registers with Open WebUI for per-user remote browser tools",
   "license": "Apache-2.0",
   "type": "module",

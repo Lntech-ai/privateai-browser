@@ -640,6 +640,7 @@ async function onNetworkDebuggerEvent(
 /**
  * Collect cookies for an allowlisted host.
  * Must use `url` lookups — `domain` filters omit host-only cookies (common for SESSION).
+ * Also walks every cookie store and partitioned jars (CHIPS).
  */
 export async function collectCookiesForHost(hostname: string): Promise<chrome.cookies.Cookie[]> {
   const host = assertCookieDomain(hostname);
@@ -651,27 +652,57 @@ export async function collectCookiesForHost(hostname: string): Promise<chrome.co
     `https://www.${bare}/explore`,
   ];
   const byKey = new Map<string, chrome.cookies.Cookie>();
+
+  const storeIds: (string | undefined)[] = [undefined];
+  try {
+    const stores = await chrome.cookies.getAllCookieStores();
+    for (const s of stores || []) {
+      if (s?.id) storeIds.push(s.id);
+    }
+  } catch {
+    // older Chromium
+  }
+
+  const partitionKeys: (chrome.cookies.CookiePartitionKey | undefined)[] = [
+    undefined,
+    { topLevelSite: `https://www.${bare}` },
+    { topLevelSite: `https://${bare}` },
+  ];
+
+  const ingest = (list: chrome.cookies.Cookie[]) => {
+    for (const c of list) {
+      byKey.set(`${c.name}\0${c.domain}\0${c.path}\0${(c as any).partitionKey || ""}`, c);
+    }
+  };
+
   for (const url of urlCandidates) {
     try {
       assertAllowedUrl(url);
     } catch {
       continue;
     }
-    try {
-      for (const c of await chrome.cookies.getAll({ url })) {
-        byKey.set(`${c.name}\0${c.domain}\0${c.path}`, c);
+    for (const storeId of storeIds) {
+      for (const partitionKey of partitionKeys) {
+        try {
+          const query: chrome.cookies.GetAllDetails = { url };
+          if (storeId) query.storeId = storeId;
+          if (partitionKey) (query as any).partitionKey = partitionKey;
+          ingest(await chrome.cookies.getAll(query));
+        } catch {
+          // ignore per-query failures
+        }
       }
-    } catch {
-      // ignore per-url failures
     }
   }
   for (const domain of [bare, `.${bare}`, `www.${bare}`]) {
-    try {
-      for (const c of await chrome.cookies.getAll({ domain })) {
-        byKey.set(`${c.name}\0${c.domain}\0${c.path}`, c);
+    for (const storeId of storeIds) {
+      try {
+        const query: chrome.cookies.GetAllDetails = { domain };
+        if (storeId) query.storeId = storeId;
+        ingest(await chrome.cookies.getAll(query));
+      } catch {
+        // ignore
       }
-    } catch {
-      // ignore
     }
   }
   return [...byKey.values()];
@@ -788,9 +819,99 @@ export async function getCookies(params: {
   };
 }
 
+/** In-tab fetch with the page's live cookie jar (incl. httpOnly). No focus steal. */
+async function fetchInPageTab(
+  tabId: number,
+  url: string,
+  method: string,
+  headers: Record<string, string>,
+  body: string | undefined,
+  timeoutMs: number,
+): Promise<Record<string, unknown>> {
+  // Never inject Cookie — the page credentials handle auth.
+  const pageHeaders = { ...headers };
+  for (const key of Object.keys(pageHeaders)) {
+    if (key.toLowerCase() === "cookie") delete pageHeaders[key];
+  }
+  const results = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    args: [url, method, pageHeaders, body ?? null, timeoutMs, FETCH_BODY_MAX_BYTES] as const,
+    func: async (reqUrl, reqMethod, reqHeaders, reqBody, timeout, maxBytes) => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeout);
+      try {
+        const init: RequestInit = {
+          method: reqMethod,
+          headers: reqHeaders as HeadersInit,
+          credentials: "include",
+          redirect: "manual",
+          signal: controller.signal,
+        };
+        if (reqBody != null && reqMethod !== "GET" && reqMethod !== "HEAD") {
+          init.body = reqBody;
+        }
+        const res = await fetch(reqUrl, init);
+        if (res.type === "opaqueredirect" || (res.status >= 300 && res.status < 400)) {
+          return {
+            ok: false,
+            status: res.status,
+            error: `HTTP redirect not followed (${res.status})`,
+            location: res.headers.get("Location"),
+            via: "page",
+          };
+        }
+        let text = await res.text();
+        let truncated = false;
+        if (text.length > maxBytes) {
+          text = text.slice(0, maxBytes);
+          truncated = true;
+        }
+        let json: unknown;
+        const ct = res.headers.get("content-type") || "";
+        if (ct.includes("json") || /^\s*[\[{]/.test(text)) {
+          try {
+            json = JSON.parse(text);
+          } catch {
+            json = undefined;
+          }
+        }
+        const responseHeaders: Record<string, string> = {};
+        res.headers.forEach((v, k) => {
+          responseHeaders[k] = v;
+        });
+        return {
+          ok: res.ok,
+          status: res.status,
+          headers: responseHeaders,
+          body_text: text,
+          body_truncated: truncated,
+          ...(json !== undefined ? { json } : {}),
+          via: "page",
+        };
+      } catch (err) {
+        return {
+          ok: false,
+          status: 0,
+          error: err instanceof Error ? err.message : String(err),
+          via: "page",
+        };
+      } finally {
+        clearTimeout(timer);
+      }
+    },
+  });
+  const result = results?.[0]?.result;
+  if (!result || typeof result !== "object") {
+    return { ok: false, status: 0, error: "In-page fetch returned no result", via: "page" };
+  }
+  return result as Record<string, unknown>;
+}
+
 /**
- * Authenticated fetch for allowlisted https URLs using the user's chrome.cookies.
- * Runs in the service worker (no CORS). Does not use CDP Network.getCookies / loadNetworkResource.
+ * Authenticated fetch for allowlisted https URLs.
+ * Prefer in-page fetch on a background kalodata tab (live session cookies).
+ * Fall back to service-worker fetch with chrome.cookies Cookie header.
  */
 export async function bridgeFetch(params: {
   url?: string;
@@ -807,12 +928,7 @@ export async function bridgeFetch(params: {
     Math.min(120_000, Number(params.timeout_ms) || 30_000),
   );
 
-  const allCookies = await collectCookiesForHost(parsed.hostname);
-  const cookieHeader = allCookies.map((c) => `${c.name}=${c.value}`).join("; ");
-
   const headers = sanitizeBridgeHeaders(params.headers);
-  if (cookieHeader) headers.Cookie = cookieHeader;
-
   let body: string | undefined;
   if (params.body != null && method !== "GET" && method !== "HEAD") {
     if (typeof params.body === "string") {
@@ -825,6 +941,34 @@ export async function bridgeFetch(params: {
     }
   }
 
+  // Prefer the live tab session — does not require copying Cookie into the SW.
+  let pageError: string | undefined;
+  try {
+    const explore =
+      parsed.hostname.includes("kalodata")
+        ? "https://www.kalodata.com/explore"
+        : `${parsed.origin}/`;
+    const ensured = await ensureBackgroundTab(explore);
+    const pageResult = await fetchInPageTab(
+      ensured.tabId,
+      parsed.href,
+      method,
+      headers,
+      body,
+      timeoutMs,
+    );
+    if (pageResult.ok || (typeof pageResult.status === "number" && pageResult.status > 0)) {
+      return pageResult;
+    }
+    pageError = String(pageResult.error || `page fetch status ${pageResult.status}`);
+  } catch (err) {
+    pageError = err instanceof Error ? err.message : String(err);
+  }
+
+  const allCookies = await collectCookiesForHost(parsed.hostname);
+  const cookieHeader = allCookies.map((c) => `${c.name}=${c.value}`).join("; ");
+  if (cookieHeader) headers.Cookie = cookieHeader;
+
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -834,7 +978,6 @@ export async function bridgeFetch(params: {
       body,
       signal: controller.signal,
       credentials: "omit",
-      // Manual redirects so we never follow off-allowlist Location targets.
       redirect: "manual",
     });
     if (res.type === "opaqueredirect" || (res.status >= 300 && res.status < 400)) {
@@ -847,6 +990,8 @@ export async function bridgeFetch(params: {
             ok: false,
             status: res.status,
             error: `Redirect target not allowlisted: ${location}`,
+            via: "service_worker",
+            page_error: pageError,
           };
         }
       }
@@ -854,6 +999,8 @@ export async function bridgeFetch(params: {
         ok: false,
         status: res.status,
         error: `HTTP redirect not followed (${res.status}). Bridge fetch does not auto-follow redirects.`,
+        via: "service_worker",
+        page_error: pageError,
       };
     }
     try {
@@ -863,6 +1010,8 @@ export async function bridgeFetch(params: {
         ok: false,
         status: res.status,
         error: `Final response URL not allowlisted: ${res.url}`,
+        via: "service_worker",
+        page_error: pageError,
       };
     }
     const raw = await res.arrayBuffer();
@@ -893,10 +1042,20 @@ export async function bridgeFetch(params: {
       body_text,
       body_truncated: truncated,
       ...(json !== undefined ? { json } : {}),
+      via: "service_worker",
+      cookie_count: allCookies.length,
+      page_error: pageError,
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    return { ok: false, error: message, status: 0 };
+    return {
+      ok: false,
+      error: message,
+      status: 0,
+      via: "service_worker",
+      cookie_count: allCookies.length,
+      page_error: pageError,
+    };
   } finally {
     clearTimeout(timer);
   }
