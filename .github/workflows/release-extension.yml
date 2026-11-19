@@ -18,11 +18,19 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      - name: Set up pnpm and Node
-        uses: pnpm/setup@v3
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
         with:
-          cache: true
-          require-lockfile: true
+          version: 12.9.1
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
 
       - name: Read extension version
         id: meta
@@ -47,7 +55,6 @@ jobs:
           ls -lh apps/extension/.output/*.zip
 
       # Auth + options via env (private key has newlines; CLI flags break them).
-      # publish-extension runs with cwd apps/extension when using filter exec.
       - name: Publish to Chrome Web Store
         working-directory: apps/extension
         env:
@@ -60,7 +67,7 @@ jobs:
           CHROME_ZIP: .output/${{ steps.meta.outputs.zip_name }}
         run: |
           if [ -z "${CHROME_SERVICE_ACCOUNT_CLIENT_EMAIL}" ] || [ -z "${CHROME_SERVICE_ACCOUNT_PRIVATE_KEY}" ]; then
-            echo "Missing Chrome Web Store secrets; skipping publish."
+            echo "Missing Chrome Web Store secrets; failing publish."
             exit 1
           fi
           pnpm exec publish-extension
