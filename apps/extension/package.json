@@ -1,6 +1,6 @@
 {
   "name": "@privateai/browser-extension",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "PrivateAI Browser: Chrome extension that registers with Open WebUI for per-user remote browser tools",
   "license": "Apache-2.0",
   "type": "module",
@@ -32,6 +32,7 @@
     "@types/ws": "^8.18.1",
     "@wxt-dev/auto-icons": "^1.1.2",
     "@wxt-dev/module-react": "^1.2.2",
+    "publish-browser-extension": "6.2.0",
     "tailwindcss": "^4.3.5",
     "typescript": "^7.0.2",
     "vitest": "^5.1.0",

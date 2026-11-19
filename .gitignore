@@ -9,3 +9,5 @@ coverage
 test-results/
 playwright-report/
 apps/extension/extension-key.pem
+
+.publish-tmp/

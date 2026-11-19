@@ -46,6 +46,25 @@ jobs:
           cp "$SRC" "apps/extension/.output/${{ steps.meta.outputs.zip_name }}"
           ls -lh apps/extension/.output/*.zip
 
+      # Auth + options via env (private key has newlines; CLI flags break them).
+      # publish-extension runs with cwd apps/extension when using filter exec.
+      - name: Publish to Chrome Web Store
+        working-directory: apps/extension
+        env:
+          CHROME_API_VERSION: v2
+          CHROME_EXTENSION_ID: bknhphccokmmlbjcmlnnlanpcoebhfbp
+          CHROME_PUBLISHER_ID: ce40d4b2-4148-4b2d-8d7f-c9c725683baf
+          CHROME_SERVICE_ACCOUNT_CLIENT_EMAIL: ${{ secrets.CHROME_SERVICE_ACCOUNT_CLIENT_EMAIL }}
+          CHROME_SERVICE_ACCOUNT_PRIVATE_KEY: ${{ secrets.CHROME_SERVICE_ACCOUNT_PRIVATE_KEY }}
+          CHROME_CANCEL_PENDING: "true"
+          CHROME_ZIP: .output/${{ steps.meta.outputs.zip_name }}
+        run: |
+          if [ -z "${CHROME_SERVICE_ACCOUNT_CLIENT_EMAIL}" ] || [ -z "${CHROME_SERVICE_ACCOUNT_PRIVATE_KEY}" ]; then
+            echo "Missing Chrome Web Store secrets; skipping publish."
+            exit 1
+          fi
+          pnpm exec publish-extension
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -56,7 +75,7 @@ jobs:
 
             - Version: `${{ steps.meta.outputs.version }}`
             - Commit: `${{ github.sha }}`
-            - Upload `${{ steps.meta.outputs.zip_name }}` to the Chrome Web Store (no manifest `key`).
+            - Submitted to the Chrome Web Store automatically (item `bknhphccokmmlbjcmlnnlanpcoebhfbp`).
           files: apps/extension/.output/${{ steps.meta.outputs.zip_name }}
           make_latest: true
           fail_on_unmatched_files: true

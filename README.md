@@ -4,6 +4,13 @@ Fork of [BrowserMCP/mcp](https://github.com/BrowserMCP/mcp) (Apache-2.0) rebrand
 
 This extension connects **out** to your Open WebUI instance over Socket.IO, registers as a per-user **browser bridge**, and executes chat tool calls (`browser_navigate`, `browser_screenshot`, …) with `chrome.debugger` on your machine. No WireGuard or companion app.
 
+## Chrome Web Store
+
+Pushes to `main` build the extension, create a GitHub Release, and submit the zip to the
+[Chrome Web Store](https://chromewebstore.google.com/detail/bknhphccokmmlbjcmlnnlanpcoebhfbp)
+via `.github/workflows/release-extension.yml`. Bump `apps/extension/package.json` `version`
+before merging — the store rejects uploads that do not increase the version.
+
 ## Install (load unpacked)
 
 1. Node.js 24+, `corepack enable`, then:
