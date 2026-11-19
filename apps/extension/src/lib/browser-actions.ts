@@ -1135,8 +1135,45 @@ export async function networkLog(params: { clear?: boolean; limit?: number } = {
   };
 }
 
+const BRIDGE_ACTIONS = [
+  "capabilities",
+  "navigate",
+  "ensure_tab",
+  "screenshot",
+  "snapshot",
+  "tab_list",
+  "tab_switch",
+  "tab_close",
+  "click",
+  "type",
+  "get_cookies",
+  "fetch",
+  "network_listen",
+  "network_log",
+  "stop",
+  "resume",
+] as const;
+
+export async function bridgeCapabilities() {
+  const manifest = chrome.runtime.getManifest();
+  return {
+    ok: true,
+    name: manifest.name,
+    version: manifest.version,
+    actions: [...BRIDGE_ACTIONS],
+    supports: {
+      fetch: true,
+      get_cookies: true,
+      network_listen: true,
+      in_page_fetch: true,
+    },
+  };
+}
+
 export async function handleAction(action: string, params: Record<string, unknown> = {}) {
   switch (action) {
+    case "capabilities":
+      return bridgeCapabilities();
     case "navigate":
       return navigate(params as { url: string; new_tab?: boolean; activate?: boolean });
     case "ensure_tab":
@@ -1186,6 +1223,9 @@ export async function handleAction(action: string, params: Record<string, unknow
     case "resume":
       return resumeAgents();
     default:
-      return { ok: false, error: `Unknown action: ${action}` };
+      return {
+        ok: false,
+        error: `Unknown action: ${action}. This extension build does not support it. Supported: ${BRIDGE_ACTIONS.join(", ")}. Install PrivateAI Browser ≥ 0.1.4.`,
+      };
   }
 }
