@@ -435,20 +435,199 @@ export async function resumeAgents() {
   return { ok: true, stopped: false };
 }
 
-/** Domains OWUI may ask for cookies from (never arbitrary sites). */
-const COOKIE_DOMAIN_ALLOWLIST = new Set(["kalodata.com", "www.kalodata.com"]);
+/** Hosts OWUI may read cookies from / fetch / listen on (never arbitrary sites). */
+export const BRIDGE_HOST_ALLOWLIST = new Set(["kalodata.com", "www.kalodata.com"]);
 
-function assertCookieDomain(domain: string): string {
+const FETCH_BODY_MAX_BYTES = 1_500_000;
+const NETWORK_BUFFER_MAX = 50;
+const FORBIDDEN_REQUEST_HEADERS = new Set([
+  "host",
+  "cookie",
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+  "content-length",
+]);
+
+type NetworkLogEntry = {
+  requestId: string;
+  url: string;
+  method: string;
+  status?: number;
+  mimeType?: string;
+  resourceType?: string;
+  timestamp: number;
+  requestHeaders?: Record<string, string>;
+  responseHeaders?: Record<string, string>;
+  body_text?: string;
+  body_truncated?: boolean;
+};
+
+let networkListening = false;
+let networkListenTabId: number | null = null;
+let networkAttachedByUs = false;
+let networkBuffer: NetworkLogEntry[] = [];
+const networkPending = new Map<string, NetworkLogEntry>();
+let networkEventHandler:
+  | ((source: chrome.debugger.Debuggee, method: string, params?: object) => void)
+  | null = null;
+
+/** True when hostname is allowlisted or a subdomain of an allowlisted registrable host. */
+export function isAllowedHost(hostname: string): boolean {
+  const host = String(hostname || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\.$/, "");
+  if (!host) return false;
+  if (BRIDGE_HOST_ALLOWLIST.has(host)) return true;
+  for (const allowed of BRIDGE_HOST_ALLOWLIST) {
+    if (host === allowed || host.endsWith(`.${allowed}`)) return true;
+  }
+  return false;
+}
+
+export function assertCookieDomain(domain: string): string {
   const cleaned = String(domain || "")
     .trim()
     .toLowerCase()
     .replace(/^\.+/, "");
-  if (!cleaned || !COOKIE_DOMAIN_ALLOWLIST.has(cleaned)) {
+  if (!cleaned || !isAllowedHost(cleaned)) {
     throw new Error(
-      `Cookie domain not allowed: ${domain}. Allowlist: ${[...COOKIE_DOMAIN_ALLOWLIST].join(", ")}`,
+      `Cookie domain not allowed: ${domain}. Allowlist: ${[...BRIDGE_HOST_ALLOWLIST].join(", ")}`,
     );
   }
   return cleaned;
+}
+
+/** https-only URL whose host is on the bridge allowlist. */
+export function assertAllowedUrl(url: string): URL {
+  let parsed: URL;
+  try {
+    parsed = new URL(String(url || "").trim());
+  } catch {
+    throw new Error("Invalid URL");
+  }
+  if (parsed.protocol !== "https:") {
+    throw new Error("Only https URLs are allowed for bridge fetch/listen");
+  }
+  if (!isAllowedHost(parsed.hostname)) {
+    throw new Error(
+      `Host not allowed: ${parsed.hostname}. Allowlist: ${[...BRIDGE_HOST_ALLOWLIST].join(", ")}`,
+    );
+  }
+  return parsed;
+}
+
+export function sanitizeBridgeHeaders(
+  headers: Record<string, unknown> | undefined,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!headers || typeof headers !== "object") return out;
+  for (const [rawKey, rawVal] of Object.entries(headers)) {
+    const key = String(rawKey || "").trim();
+    if (!key) continue;
+    if (FORBIDDEN_REQUEST_HEADERS.has(key.toLowerCase())) continue;
+    if (rawVal == null) continue;
+    out[key] = String(rawVal);
+  }
+  return out;
+}
+
+function pushNetworkEntry(entry: NetworkLogEntry) {
+  networkBuffer.push(entry);
+  if (networkBuffer.length > NETWORK_BUFFER_MAX) {
+    networkBuffer = networkBuffer.slice(-NETWORK_BUFFER_MAX);
+  }
+}
+
+function isAllowlistedUrlString(url: string): boolean {
+  try {
+    assertAllowedUrl(url);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function onNetworkDebuggerEvent(
+  source: chrome.debugger.Debuggee,
+  method: string,
+  params?: object,
+) {
+  if (!networkListening) return;
+  if (source.tabId == null || source.tabId !== networkListenTabId) return;
+  const p = (params || {}) as Record<string, any>;
+
+  if (method === "Network.requestWillBeSent") {
+    const url = String(p.request?.url || "");
+    if (!isAllowlistedUrlString(url)) return;
+    const entry: NetworkLogEntry = {
+      requestId: String(p.requestId || ""),
+      url,
+      method: String(p.request?.method || "GET"),
+      resourceType: p.type ? String(p.type) : undefined,
+      timestamp: Date.now(),
+      requestHeaders:
+        p.request?.headers && typeof p.request.headers === "object"
+          ? { ...p.request.headers }
+          : undefined,
+    };
+    if (!entry.requestId) return;
+    networkPending.set(entry.requestId, entry);
+    return;
+  }
+
+  if (method === "Network.responseReceived") {
+    const requestId = String(p.requestId || "");
+    const entry = networkPending.get(requestId);
+    if (!entry) return;
+    entry.status = typeof p.response?.status === "number" ? p.response.status : undefined;
+    entry.mimeType = p.response?.mimeType ? String(p.response.mimeType) : undefined;
+    if (p.response?.headers && typeof p.response.headers === "object") {
+      entry.responseHeaders = { ...p.response.headers };
+    }
+    return;
+  }
+
+  if (method === "Network.loadingFinished") {
+    const requestId = String(p.requestId || "");
+    const entry = networkPending.get(requestId);
+    if (!entry) return;
+    networkPending.delete(requestId);
+    try {
+      const body = (await chrome.debugger.sendCommand({ tabId: source.tabId }, "Network.getResponseBody", {
+        requestId,
+      })) as { body?: string; base64Encoded?: boolean } | undefined;
+      if (body?.body != null) {
+        let text = body.base64Encoded
+          ? // Avoid bundling a decoder; mark binary payloads as truncated metadata.
+            `[base64 ${body.body.length} chars]`
+          : String(body.body);
+        if (text.length > FETCH_BODY_MAX_BYTES) {
+          text = text.slice(0, FETCH_BODY_MAX_BYTES);
+          entry.body_truncated = true;
+        }
+        entry.body_text = text;
+      }
+    } catch {
+      // body may be unavailable; metadata still useful
+    }
+    pushNetworkEntry(entry);
+  }
+
+  if (method === "Network.loadingFailed") {
+    const requestId = String(p.requestId || "");
+    const entry = networkPending.get(requestId);
+    if (!entry) return;
+    networkPending.delete(requestId);
+    entry.status = entry.status ?? 0;
+    pushNetworkEntry(entry);
+  }
 }
 
 /**
@@ -481,6 +660,195 @@ export async function getCookies(params: {
   return { ok: true, domain, cookies, cookie, cookie_header: cookie };
 }
 
+/**
+ * Authenticated fetch for allowlisted https URLs using the user's chrome.cookies.
+ * Runs in the service worker (no CORS). Does not use CDP Network.getCookies / loadNetworkResource.
+ */
+export async function bridgeFetch(params: {
+  url?: string;
+  method?: string;
+  headers?: Record<string, unknown>;
+  body?: string | Record<string, unknown> | null;
+  timeout_ms?: number;
+} = {}) {
+  assertNotStopped();
+  const parsed = assertAllowedUrl(params.url || "");
+  const method = String(params.method || "GET").toUpperCase();
+  const timeoutMs = Math.max(
+    1_000,
+    Math.min(120_000, Number(params.timeout_ms) || 30_000),
+  );
+
+  const cookieDomain = parsed.hostname.replace(/^www\./, "");
+  const allCookies = await chrome.cookies.getAll({ domain: cookieDomain });
+  const cookieHeader = allCookies.map((c) => `${c.name}=${c.value}`).join("; ");
+
+  const headers = sanitizeBridgeHeaders(params.headers);
+  if (cookieHeader) headers.Cookie = cookieHeader;
+
+  let body: string | undefined;
+  if (params.body != null && method !== "GET" && method !== "HEAD") {
+    if (typeof params.body === "string") {
+      body = params.body;
+    } else {
+      body = JSON.stringify(params.body);
+      if (!Object.keys(headers).some((k) => k.toLowerCase() === "content-type")) {
+        headers["Content-Type"] = "application/json";
+      }
+    }
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(parsed.href, {
+      method,
+      headers,
+      body,
+      signal: controller.signal,
+      credentials: "omit",
+      // Manual redirects so we never follow off-allowlist Location targets.
+      redirect: "manual",
+    });
+    if (res.type === "opaqueredirect" || (res.status >= 300 && res.status < 400)) {
+      const location = res.headers.get("Location") || res.url || "";
+      if (location) {
+        try {
+          assertAllowedUrl(new URL(location, parsed.href).href);
+        } catch {
+          return {
+            ok: false,
+            status: res.status,
+            error: `Redirect target not allowlisted: ${location}`,
+          };
+        }
+      }
+      return {
+        ok: false,
+        status: res.status,
+        error: `HTTP redirect not followed (${res.status}). Bridge fetch does not auto-follow redirects.`,
+      };
+    }
+    try {
+      assertAllowedUrl(res.url || parsed.href);
+    } catch {
+      return {
+        ok: false,
+        status: res.status,
+        error: `Final response URL not allowlisted: ${res.url}`,
+      };
+    }
+    const raw = await res.arrayBuffer();
+    let truncated = false;
+    let bytes = new Uint8Array(raw);
+    if (bytes.byteLength > FETCH_BODY_MAX_BYTES) {
+      bytes = bytes.slice(0, FETCH_BODY_MAX_BYTES);
+      truncated = true;
+    }
+    const body_text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+    let json: unknown;
+    const ct = res.headers.get("content-type") || "";
+    if (ct.includes("json") || /^\s*[\[{]/.test(body_text)) {
+      try {
+        json = JSON.parse(body_text);
+      } catch {
+        json = undefined;
+      }
+    }
+    const responseHeaders: Record<string, string> = {};
+    res.headers.forEach((v, k) => {
+      responseHeaders[k] = v;
+    });
+    return {
+      ok: res.ok,
+      status: res.status,
+      headers: responseHeaders,
+      body_text,
+      body_truncated: truncated,
+      ...(json !== undefined ? { json } : {}),
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: message, status: 0 };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function networkListen(params: { enabled?: boolean } = {}) {
+  assertNotStopped();
+  const enabled = params.enabled !== false;
+
+  if (!enabled) {
+    if (networkEventHandler) {
+      try {
+        chrome.debugger.onEvent.removeListener(networkEventHandler);
+      } catch {
+        // ignore
+      }
+      networkEventHandler = null;
+    }
+    if (networkAttachedByUs && networkListenTabId != null) {
+      await detachDebugger(networkListenTabId);
+    }
+    networkListening = false;
+    networkListenTabId = null;
+    networkAttachedByUs = false;
+    networkPending.clear();
+    return { ok: true, listening: false, buffer_size: networkBuffer.length };
+  }
+
+  const tabId = await ensureAgentTab();
+  let attachedByUs = false;
+  try {
+    await chrome.debugger.attach({ tabId }, "1.3");
+    attachedByUs = true;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // Already attached by another debugger session — reuse it.
+    if (!/already attached/i.test(msg)) {
+      throw new Error(`Failed to attach debugger for network listen: ${msg}`);
+    }
+  }
+
+  await chrome.debugger.sendCommand({ tabId }, "Network.enable", {});
+
+  if (networkEventHandler) {
+    try {
+      chrome.debugger.onEvent.removeListener(networkEventHandler);
+    } catch {
+      // ignore
+    }
+  }
+  networkEventHandler = onNetworkDebuggerEvent;
+  chrome.debugger.onEvent.addListener(networkEventHandler);
+
+  networkListening = true;
+  networkListenTabId = tabId;
+  networkAttachedByUs = attachedByUs;
+  return {
+    ok: true,
+    listening: true,
+    tabId,
+    buffer_size: networkBuffer.length,
+    allowlist: [...BRIDGE_HOST_ALLOWLIST],
+  };
+}
+
+export async function networkLog(params: { clear?: boolean; limit?: number } = {}) {
+  assertNotStopped();
+  const limit = Math.max(1, Math.min(NETWORK_BUFFER_MAX, Number(params.limit) || NETWORK_BUFFER_MAX));
+  const entries = networkBuffer.slice(-limit);
+  if (params.clear) networkBuffer = [];
+  return {
+    ok: true,
+    listening: networkListening,
+    tabId: networkListenTabId,
+    count: entries.length,
+    entries,
+  };
+}
+
 export async function handleAction(action: string, params: Record<string, unknown> = {}) {
   switch (action) {
     case "navigate":
@@ -509,6 +877,20 @@ export async function handleAction(action: string, params: Record<string, unknow
       );
     case "get_cookies":
       return getCookies(params as { domain?: string; names?: string[] });
+    case "fetch":
+      return bridgeFetch(
+        params as {
+          url?: string;
+          method?: string;
+          headers?: Record<string, unknown>;
+          body?: string | Record<string, unknown> | null;
+          timeout_ms?: number;
+        },
+      );
+    case "network_listen":
+      return networkListen(params as { enabled?: boolean });
+    case "network_log":
+      return networkLog(params as { clear?: boolean; limit?: number });
     case "stop":
       return stopAgents();
     case "resume":
