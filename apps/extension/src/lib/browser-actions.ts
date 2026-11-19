@@ -208,35 +208,42 @@ function resolveTarget(params: {
   return String(params.ref || params.target || params.selector || "").trim();
 }
 
-export async function navigate(params: { url: string; new_tab?: boolean }) {
+export async function navigate(params: {
+  url: string;
+  new_tab?: boolean;
+  /** When true, steal focus. Default false — keep the user's current tab. */
+  activate?: boolean;
+}) {
   assertNotStopped();
   const url = assertNavigableUrl(params.url);
+  // Background by default so agent work does not yank the user's tab.
+  const activate = params.activate === true;
 
   // Default: open a new tab in the PrivateAI group (AI decides later what to close).
   // new_tab=false → reuse the current agent tab in place (e.g. follow a link path).
-  // Exact URL already open → just focus it (no duplicate).
+  // Exact URL already open → reuse (focus only if activate=true).
   const forceNew = params.new_tab !== false;
   let tabId: number | null = await findExactTabForUrl(url);
   let created = false;
 
   if (tabId != null) {
-    await chrome.tabs.update(tabId, { active: true });
+    if (activate) await chrome.tabs.update(tabId, { active: true });
   } else if (!forceNew) {
     tabId = await resolveActiveAgentTabId();
     if (tabId != null) {
-      await chrome.tabs.update(tabId, { url, active: true });
+      await chrome.tabs.update(tabId, { url, ...(activate ? { active: true } : {}) });
     }
   }
 
   if (tabId == null) {
-    const tab = await chrome.tabs.create({ url, active: true });
+    const tab = await chrome.tabs.create({ url, active: activate });
     tabId = tab.id!;
     created = true;
   }
 
   await rememberActiveTab(tabId);
   await ensureAgentGroup(tabId);
-  return { ok: true, tabId, url, created };
+  return { ok: true, tabId, url, created, activated: activate };
 }
 
 export async function tabList() {
@@ -631,23 +638,135 @@ async function onNetworkDebuggerEvent(
 }
 
 /**
+ * Collect cookies for an allowlisted host.
+ * Must use `url` lookups — `domain` filters omit host-only cookies (common for SESSION).
+ */
+export async function collectCookiesForHost(hostname: string): Promise<chrome.cookies.Cookie[]> {
+  const host = assertCookieDomain(hostname);
+  const bare = host.replace(/^www\./, "");
+  const urlCandidates = [
+    `https://${host}/`,
+    `https://www.${bare}/`,
+    `https://${bare}/`,
+    `https://www.${bare}/explore`,
+  ];
+  const byKey = new Map<string, chrome.cookies.Cookie>();
+  for (const url of urlCandidates) {
+    try {
+      assertAllowedUrl(url);
+    } catch {
+      continue;
+    }
+    try {
+      for (const c of await chrome.cookies.getAll({ url })) {
+        byKey.set(`${c.name}\0${c.domain}\0${c.path}`, c);
+      }
+    } catch {
+      // ignore per-url failures
+    }
+  }
+  for (const domain of [bare, `.${bare}`, `www.${bare}`]) {
+    try {
+      for (const c of await chrome.cookies.getAll({ domain })) {
+        byKey.set(`${c.name}\0${c.domain}\0${c.path}`, c);
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return [...byKey.values()];
+}
+
+async function waitForTabComplete(tabId: number, timeoutMs = 15_000): Promise<void> {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      if (tab.status === "complete") return;
+    } catch {
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+}
+
+/** Open/reuse an allowlisted URL in a background tab (no focus steal). */
+export async function ensureBackgroundTab(url: string): Promise<{
+  tabId: number;
+  created: boolean;
+  url: string;
+}> {
+  const href = assertAllowedUrl(url).href;
+  const exact = await findExactTabForUrl(href);
+  if (exact != null) {
+    await rememberActiveTab(exact);
+    await ensureAgentGroup(exact);
+    return { tabId: exact, created: false, url: href };
+  }
+
+  const origin = new URL(href).origin;
+  const existing = (await chrome.tabs.query({})).find(
+    (t) =>
+      t.id != null &&
+      typeof t.url === "string" &&
+      t.url.startsWith(origin) &&
+      !t.url.includes("/login"),
+  );
+  if (existing?.id != null) {
+    await rememberActiveTab(existing.id);
+    await ensureAgentGroup(existing.id);
+    return { tabId: existing.id, created: false, url: existing.url || href };
+  }
+
+  const tab = await chrome.tabs.create({ url: href, active: false });
+  const tabId = tab.id!;
+  await rememberActiveTab(tabId);
+  await ensureAgentGroup(tabId);
+  await waitForTabComplete(tabId);
+  return { tabId, created: true, url: href };
+}
+
+/**
  * Read allowlisted site cookies (e.g. Kalodata SESSION) for OWUI tools.
  * Uses chrome.cookies — not CDP Network.getCookies (blocked by policy).
  */
 export async function getCookies(params: {
   domain?: string;
   names?: string[];
+  /** Open this allowlisted URL in a background tab before reading cookies. */
+  ensure_url?: string;
 } = {}) {
   assertNotStopped();
   const domain = assertCookieDomain(params.domain || "kalodata.com");
   const names = Array.isArray(params.names)
     ? params.names.map((n) => String(n)).filter(Boolean)
     : [];
-  const all = await chrome.cookies.getAll({ domain });
+
+  let ensured: { tabId: number; created: boolean; url: string } | undefined;
+  const ensureUrl =
+    params.ensure_url ||
+    (domain.includes("kalodata") ? "https://www.kalodata.com/explore" : "");
+  if (ensureUrl) {
+    try {
+      ensured = await ensureBackgroundTab(ensureUrl);
+    } catch {
+      // cookie read can still succeed without a tab
+    }
+  }
+
+  const all = await collectCookiesForHost(domain);
   const filtered = names.length
     ? all.filter((c) => names.includes(c.name))
     : all;
-  const cookies = filtered.map((c) => ({
+  // Prefer SESSION even when other cookies exist and names filter was empty.
+  const ordered =
+    names.length || !filtered.some((c) => c.name === "SESSION")
+      ? filtered
+      : [
+          ...filtered.filter((c) => c.name === "SESSION"),
+          ...filtered.filter((c) => c.name !== "SESSION"),
+        ];
+  const cookies = ordered.map((c) => ({
     name: c.name,
     value: c.value,
     domain: c.domain,
@@ -657,7 +776,16 @@ export async function getCookies(params: {
     expirationDate: c.expirationDate,
   }));
   const cookie = cookies.map((c) => `${c.name}=${c.value}`).join("; ");
-  return { ok: true, domain, cookies, cookie, cookie_header: cookie };
+  return {
+    ok: true,
+    domain,
+    cookies,
+    cookie,
+    cookie_header: cookie,
+    ensured_url: ensured?.url,
+    ensured_tab_id: ensured?.tabId,
+    ensured_created: ensured?.created,
+  };
 }
 
 /**
@@ -679,8 +807,7 @@ export async function bridgeFetch(params: {
     Math.min(120_000, Number(params.timeout_ms) || 30_000),
   );
 
-  const cookieDomain = parsed.hostname.replace(/^www\./, "");
-  const allCookies = await chrome.cookies.getAll({ domain: cookieDomain });
+  const allCookies = await collectCookiesForHost(parsed.hostname);
   const cookieHeader = allCookies.map((c) => `${c.name}=${c.value}`).join("; ");
 
   const headers = sanitizeBridgeHeaders(params.headers);
@@ -852,7 +979,9 @@ export async function networkLog(params: { clear?: boolean; limit?: number } = {
 export async function handleAction(action: string, params: Record<string, unknown> = {}) {
   switch (action) {
     case "navigate":
-      return navigate(params as { url: string; new_tab?: boolean });
+      return navigate(params as { url: string; new_tab?: boolean; activate?: boolean });
+    case "ensure_tab":
+      return ensureBackgroundTab(String(params.url || ""));
     case "screenshot":
       return screenshot();
     case "snapshot":
@@ -876,7 +1005,9 @@ export async function handleAction(action: string, params: Record<string, unknow
         },
       );
     case "get_cookies":
-      return getCookies(params as { domain?: string; names?: string[] });
+      return getCookies(
+        params as { domain?: string; names?: string[]; ensure_url?: string },
+      );
     case "fetch":
       return bridgeFetch(
         params as {

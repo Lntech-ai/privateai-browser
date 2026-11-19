@@ -1,10 +1,22 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const hostOnlySession = {
+  name: "SESSION",
+  value: "abc",
+  domain: "www.kalodata.com",
+  path: "/",
+  hostOnly: true,
+};
+
 vi.stubGlobal("chrome", {
   cookies: {
-    getAll: vi.fn(async () => [
-      { name: "SESSION", value: "abc", domain: ".kalodata.com", path: "/" },
-    ]),
+    // Host-only cookies are NOT returned for domain filters — only url lookups.
+    getAll: vi.fn(async (query: { url?: string; domain?: string }) => {
+      if (query.url && query.url.includes("kalodata.com")) {
+        return [hostOnlySession];
+      }
+      return [];
+    }),
   },
   storage: {
     session: {
@@ -14,9 +26,13 @@ vi.stubGlobal("chrome", {
     },
   },
   tabs: {
-    get: vi.fn(),
+    get: vi.fn(async () => ({ id: 1, status: "complete", url: "https://www.kalodata.com/explore" })),
     query: vi.fn(async () => []),
-    create: vi.fn(),
+    create: vi.fn(async ({ url, active }: { url: string; active?: boolean }) => ({
+      id: 42,
+      url,
+      active: !!active,
+    })),
     update: vi.fn(),
     remove: vi.fn(),
   },
@@ -36,6 +52,8 @@ vi.stubGlobal("chrome", {
 describe("bridge allowlist + fetch", () => {
   beforeEach(() => {
     vi.resetModules();
+    (chrome.cookies.getAll as ReturnType<typeof vi.fn>).mockClear();
+    (chrome.tabs.create as ReturnType<typeof vi.fn>).mockClear();
   });
 
   it("assertAllowedUrl accepts kalodata https hosts", async () => {
@@ -67,6 +85,29 @@ describe("bridge allowlist + fetch", () => {
       "X-Custom": "ok",
     });
     expect(headers).toEqual({ Accept: "application/json", "X-Custom": "ok" });
+  });
+
+  it("collectCookiesForHost finds host-only SESSION via url lookup", async () => {
+    const { collectCookiesForHost } = await import("./browser-actions");
+    const cookies = await collectCookiesForHost("kalodata.com");
+    expect(cookies.some((c) => c.name === "SESSION" && c.value === "abc")).toBe(true);
+    const calls = (chrome.cookies.getAll as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls.some((c) => c[0]?.url)).toBe(true);
+  });
+
+  it("getCookies ensures /explore in a background tab", async () => {
+    const { getCookies } = await import("./browser-actions");
+    const result = await getCookies({
+      domain: "kalodata.com",
+      names: ["SESSION"],
+      ensure_url: "https://www.kalodata.com/explore",
+    });
+    expect(result.ok).toBe(true);
+    expect(result.cookie).toContain("SESSION=abc");
+    expect(chrome.tabs.create).toHaveBeenCalledWith({
+      url: "https://www.kalodata.com/explore",
+      active: false,
+    });
   });
 
   it("bridgeFetch rejects non-allowlisted host before cookies", async () => {
