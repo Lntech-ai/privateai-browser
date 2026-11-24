@@ -578,3 +578,330 @@ export function typeInPage(target: string, text: string, submit: boolean): Actio
 
   return { ok: true, ref: el.getAttribute(ATTR) || undefined };
 }
+
+export type ScrollResult = {
+  ok: boolean;
+  error?: string;
+  direction?: string;
+  scrolled?: number;
+  top?: number;
+  max?: number;
+  atTop?: boolean;
+  atBottom?: boolean;
+  ref?: string;
+};
+
+/**
+ * Scroll the page (or nearest scrollable pane) / bring a ref into view.
+ * Self-contained for chrome.scripting.executeScript.
+ *
+ * direction: down | up | top | bottom | into_view
+ */
+export function scrollInPage(
+  direction: string,
+  amountPx: number,
+  target: string,
+): ScrollResult {
+  const ATTR = "data-pai-ref";
+  const dir = (direction || "").trim().toLowerCase();
+  const trimmed = (target || "").trim();
+
+  const resolveEl = (value: string): HTMLElement | null => {
+    if (!value) return null;
+    if (/^e\d+$/i.test(value)) {
+      return document.querySelector(`[${ATTR}="${value}"]`) as HTMLElement | null;
+    }
+    try {
+      return document.querySelector(value) as HTMLElement | null;
+    } catch {
+      return null;
+    }
+  };
+
+  const scrolls = (node: Element) => {
+    const style = getComputedStyle(node);
+    return (
+      /auto|scroll|overlay/.test(style.overflowY) &&
+      (node as HTMLElement).scrollHeight > (node as HTMLElement).clientHeight + 1
+    );
+  };
+
+  const findScrollBox = (from: Element | null): Element => {
+    const root = document.scrollingElement || document.documentElement;
+    if (from) {
+      for (
+        let node: Element | null = from;
+        node && node !== root;
+        node =
+          node.parentElement ||
+          ((node.getRootNode() as ShadowRoot).host as Element | null) ||
+          null
+      ) {
+        if (scrolls(node)) return node;
+      }
+      if (scrolls(root)) return root;
+    }
+
+    // Apps that hide document scroll and use an inner pane (Shopee, WhatsApp).
+    if (root.scrollHeight <= root.clientHeight + 1) {
+      let best: Element | null = null;
+      let bestArea = 0;
+      for (const node of document.body?.querySelectorAll("*") || []) {
+        if (!scrolls(node)) continue;
+        const rect = (node as HTMLElement).getBoundingClientRect();
+        const visibleH =
+          Math.max(0, Math.min(rect.bottom, innerHeight) - Math.max(rect.top, 0));
+        const visibleW =
+          Math.max(0, Math.min(rect.right, innerWidth) - Math.max(rect.left, 0));
+        const area = visibleH * visibleW;
+        if (area > bestArea) {
+          bestArea = area;
+          best = node;
+        }
+      }
+      if (best) return best;
+    }
+    return root;
+  };
+
+  if (dir === "into_view" || dir === "into-view" || (!dir && trimmed)) {
+    const el = resolveEl(trimmed);
+    if (!el) {
+      return {
+        ok: false,
+        error: trimmed
+          ? `Target ${JSON.stringify(trimmed)} not found. Call browser_snapshot again.`
+          : "Provide ref/selector for into_view, or direction down|up|top|bottom",
+      };
+    }
+    el.scrollIntoView({
+      block: "center",
+      inline: "nearest",
+      behavior: "instant" as ScrollBehavior,
+    });
+    return { ok: true, direction: "into_view", ref: el.getAttribute(ATTR) || undefined };
+  }
+
+  if (!["down", "up", "top", "bottom"].includes(dir)) {
+    return {
+      ok: false,
+      error:
+        "direction must be down|up|top|bottom|into_view (or pass ref to scroll into view)",
+    };
+  }
+
+  const anchor = trimmed ? resolveEl(trimmed) : null;
+  if (trimmed && !anchor) {
+    return {
+      ok: false,
+      error: `Target ${JSON.stringify(trimmed)} not found. Call browser_snapshot again.`,
+    };
+  }
+
+  const box = findScrollBox(anchor);
+  const htmlBox = box as HTMLElement;
+  const before = htmlBox.scrollTop;
+  const max = Math.max(0, htmlBox.scrollHeight - htmlBox.clientHeight);
+  const defaultPx = Math.max(120, Math.floor(htmlBox.clientHeight * 0.85));
+  const px = amountPx > 0 ? amountPx : defaultPx;
+
+  if (dir === "top") htmlBox.scrollTop = 0;
+  else if (dir === "bottom") htmlBox.scrollTop = max + 1;
+  else if (dir === "down") htmlBox.scrollTop = Math.min(max, before + px);
+  else htmlBox.scrollTop = Math.max(0, before - px);
+
+  box.dispatchEvent(new Event("scroll", { bubbles: true }));
+
+  const after = htmlBox.scrollTop;
+  const afterMax = Math.max(0, htmlBox.scrollHeight - htmlBox.clientHeight);
+  return {
+    ok: true,
+    direction: dir,
+    scrolled: after - before,
+    top: after,
+    max: afterMax,
+    atTop: after <= 1,
+    atBottom: after >= afterMax - 2,
+    ref: anchor?.getAttribute(ATTR) || undefined,
+  };
+}
+
+export type KeyResult = { ok: boolean; error?: string; key?: string; ref?: string };
+
+/** Dispatch a key on the target (or active element / body). Self-contained. */
+export function pressKeyInPage(key: string, target: string): KeyResult {
+  const ATTR = "data-pai-ref";
+  const raw = (key || "").trim();
+  if (!raw) return { ok: false, error: "key is required (e.g. Enter, Escape, ArrowDown, Tab)" };
+
+  const trimmed = (target || "").trim();
+  let el: HTMLElement | null = null;
+  if (trimmed) {
+    if (/^e\d+$/i.test(trimmed)) {
+      el = document.querySelector(`[${ATTR}="${trimmed}"]`) as HTMLElement | null;
+    } else {
+      try {
+        el = document.querySelector(trimmed) as HTMLElement | null;
+      } catch {
+        return { ok: false, error: `Invalid selector ${JSON.stringify(trimmed)}` };
+      }
+    }
+    if (!el) {
+      return {
+        ok: false,
+        error: `Target ${JSON.stringify(trimmed)} not found. Call browser_snapshot again.`,
+      };
+    }
+  } else {
+    el =
+      (document.activeElement as HTMLElement | null) &&
+      document.activeElement !== document.body
+        ? (document.activeElement as HTMLElement)
+        : document.body;
+  }
+
+  el.focus?.();
+  const aliases: Record<string, { key: string; code: string; keyCode: number }> = {
+    enter: { key: "Enter", code: "Enter", keyCode: 13 },
+    return: { key: "Enter", code: "Enter", keyCode: 13 },
+    escape: { key: "Escape", code: "Escape", keyCode: 27 },
+    esc: { key: "Escape", code: "Escape", keyCode: 27 },
+    tab: { key: "Tab", code: "Tab", keyCode: 9 },
+    backspace: { key: "Backspace", code: "Backspace", keyCode: 8 },
+    delete: { key: "Delete", code: "Delete", keyCode: 46 },
+    space: { key: " ", code: "Space", keyCode: 32 },
+    arrowdown: { key: "ArrowDown", code: "ArrowDown", keyCode: 40 },
+    arrowup: { key: "ArrowUp", code: "ArrowUp", keyCode: 38 },
+    arrowleft: { key: "ArrowLeft", code: "ArrowLeft", keyCode: 37 },
+    arrowright: { key: "ArrowRight", code: "ArrowRight", keyCode: 39 },
+    home: { key: "Home", code: "Home", keyCode: 36 },
+    end: { key: "End", code: "End", keyCode: 35 },
+    pageup: { key: "PageUp", code: "PageUp", keyCode: 33 },
+    pagedown: { key: "PageDown", code: "PageDown", keyCode: 34 },
+  };
+  const mapped = aliases[raw.toLowerCase()] || {
+    key: raw,
+    code: raw.length === 1 ? `Key${raw.toUpperCase()}` : raw,
+    keyCode: raw.length === 1 ? raw.toUpperCase().charCodeAt(0) : 0,
+  };
+
+  for (const type of ["keydown", "keypress", "keyup"] as const) {
+    if (type === "keypress" && mapped.key.length !== 1 && mapped.key !== "Enter") continue;
+    el.dispatchEvent(
+      new KeyboardEvent(type, {
+        key: mapped.key,
+        code: mapped.code,
+        keyCode: mapped.keyCode,
+        which: mapped.keyCode,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+  }
+  return { ok: true, key: mapped.key, ref: el.getAttribute?.(ATTR) || undefined };
+}
+
+export type HoverResult = { ok: boolean; error?: string; ref?: string };
+
+/** Hover / mouseover a ref or selector. Self-contained. */
+export function hoverInPage(target: string): HoverResult {
+  const ATTR = "data-pai-ref";
+  const trimmed = (target || "").trim();
+  if (!trimmed) return { ok: false, error: "Provide ref (from snapshot) or selector" };
+
+  let el: HTMLElement | null = null;
+  if (/^e\d+$/i.test(trimmed)) {
+    el = document.querySelector(`[${ATTR}="${trimmed}"]`) as HTMLElement | null;
+  } else {
+    try {
+      el = document.querySelector(trimmed) as HTMLElement | null;
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      return { ok: false, error: `Invalid selector (${msg})` };
+    }
+  }
+  if (!el) {
+    return {
+      ok: false,
+      error: `Target ${JSON.stringify(trimmed)} not found. Call browser_snapshot again.`,
+    };
+  }
+
+  el.scrollIntoView({
+    block: "center",
+    inline: "nearest",
+    behavior: "instant" as ScrollBehavior,
+  });
+  const rect = el.getBoundingClientRect();
+  const opts: MouseEventInit = {
+    bubbles: true,
+    cancelable: true,
+    clientX: rect.left + rect.width / 2,
+    clientY: rect.top + rect.height / 2,
+    view: window,
+  };
+  el.dispatchEvent(new MouseEvent("pointerover", opts));
+  el.dispatchEvent(new MouseEvent("pointerenter", opts));
+  el.dispatchEvent(new MouseEvent("mouseover", opts));
+  el.dispatchEvent(new MouseEvent("mouseenter", opts));
+  el.dispatchEvent(new MouseEvent("mousemove", opts));
+  return { ok: true, ref: el.getAttribute(ATTR) || undefined };
+}
+
+export type SelectResult = { ok: boolean; error?: string; value?: string; ref?: string };
+
+/** Choose an option on a <select> by value or visible label. Self-contained. */
+export function selectInPage(target: string, value: string): SelectResult {
+  const ATTR = "data-pai-ref";
+  const trimmed = (target || "").trim();
+  const want = (value || "").trim();
+  if (!trimmed) return { ok: false, error: "Provide ref/selector for the <select>" };
+  if (!want) return { ok: false, error: "value is required (option value or label text)" };
+
+  let el: HTMLElement | null = null;
+  if (/^e\d+$/i.test(trimmed)) {
+    el = document.querySelector(`[${ATTR}="${trimmed}"]`) as HTMLElement | null;
+  } else {
+    try {
+      el = document.querySelector(trimmed) as HTMLElement | null;
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      return { ok: false, error: `Invalid selector (${msg})` };
+    }
+  }
+  if (!el) {
+    return {
+      ok: false,
+      error: `Target ${JSON.stringify(trimmed)} not found. Call browser_snapshot again.`,
+    };
+  }
+
+  const select =
+    el.tagName.toLowerCase() === "select"
+      ? (el as HTMLSelectElement)
+      : (el.querySelector("select") as HTMLSelectElement | null);
+  if (!select) {
+    return { ok: false, error: "Element is not a <select> (and has no nested select)" };
+  }
+
+  const options = Array.from(select.options);
+  const match =
+    options.find((o) => o.value === want) ||
+    options.find((o) => o.text.trim() === want) ||
+    options.find((o) => o.text.trim().toLowerCase() === want.toLowerCase()) ||
+    options.find((o) => o.text.toLowerCase().includes(want.toLowerCase()));
+  if (!match) {
+    return {
+      ok: false,
+      error: `No option matching ${JSON.stringify(want)}. Options: ${options
+        .slice(0, 12)
+        .map((o) => o.text.trim() || o.value)
+        .join(" | ")}`,
+    };
+  }
+
+  select.value = match.value;
+  select.dispatchEvent(new Event("input", { bubbles: true }));
+  select.dispatchEvent(new Event("change", { bubbles: true }));
+  return { ok: true, value: match.value, ref: el.getAttribute(ATTR) || undefined };
+}

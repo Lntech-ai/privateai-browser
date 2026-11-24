@@ -4,7 +4,15 @@
  * Prefer a11y snapshot refs (e12) over fragile CSS selectors.
  */
 
-import { buildSnapshotInPage, clickInPage, typeInPage } from "./page-snapshot";
+import {
+  buildSnapshotInPage,
+  clickInPage,
+  hoverInPage,
+  pressKeyInPage,
+  scrollInPage,
+  selectInPage,
+  typeInPage,
+} from "./page-snapshot";
 
 const AGENT_GROUP_TITLE = "PrivateAI Browser";
 const ACTIVE_TAB_KEY = "privateai_agent_tab_id";
@@ -423,6 +431,114 @@ export async function typeText(params: {
       args: [target, text, !!params.submit],
     });
     return results[0]?.result ?? { ok: false, error: "Type failed (no script result)" };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+export async function scroll(params: {
+  direction?: string;
+  amount?: number;
+  ref?: string;
+  selector?: string;
+  target?: string;
+} = {}) {
+  assertNotStopped();
+  const tabId = await ensureAgentTab();
+  const direction = String(params.direction || "").trim();
+  const amount = Number(params.amount) || 0;
+  const target = resolveTarget(params);
+
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: scrollInPage,
+      args: [direction, amount, target],
+    });
+    const out = results[0]?.result ?? { ok: false, error: "Scroll failed (no script result)" };
+    return { ...out, tabId };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+export async function pressKey(params: {
+  key?: string;
+  ref?: string;
+  selector?: string;
+  target?: string;
+}) {
+  assertNotStopped();
+  const tabId = await ensureAgentTab();
+  const key = String(params.key || "").trim();
+  const target = resolveTarget(params);
+
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: pressKeyInPage,
+      args: [key, target],
+    });
+    return results[0]?.result ?? { ok: false, error: "press_key failed (no script result)" };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+export async function hover(params: {
+  ref?: string;
+  selector?: string;
+  target?: string;
+}) {
+  assertNotStopped();
+  const tabId = await ensureAgentTab();
+  const target = resolveTarget(params);
+  if (!target) {
+    return { ok: false, error: "Provide ref (from snapshot) or selector" };
+  }
+
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: hoverInPage,
+      args: [target],
+    });
+    return results[0]?.result ?? { ok: false, error: "Hover failed (no script result)" };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+export async function selectOption(params: {
+  value?: string;
+  ref?: string;
+  selector?: string;
+  target?: string;
+}) {
+  assertNotStopped();
+  const tabId = await ensureAgentTab();
+  const target = resolveTarget(params);
+  const value = String(params.value || "").trim();
+
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: selectInPage,
+      args: [target, value],
+    });
+    return results[0]?.result ?? { ok: false, error: "select failed (no script result)" };
   } catch (error) {
     return {
       ok: false,
@@ -895,6 +1011,10 @@ const BRIDGE_ACTIONS = [
   "tab_close",
   "click",
   "type",
+  "scroll",
+  "press_key",
+  "hover",
+  "select",
   "fetch",
   "network_listen",
   "network_log",
@@ -945,6 +1065,31 @@ export async function handleAction(action: string, params: Record<string, unknow
           target?: string;
           text?: string;
           submit?: boolean;
+        },
+      );
+    case "scroll":
+      return scroll(
+        params as {
+          direction?: string;
+          amount?: number;
+          ref?: string;
+          selector?: string;
+          target?: string;
+        },
+      );
+    case "press_key":
+      return pressKey(
+        params as { key?: string; ref?: string; selector?: string; target?: string },
+      );
+    case "hover":
+      return hover(params as { ref?: string; selector?: string; target?: string });
+    case "select":
+      return selectOption(
+        params as {
+          value?: string;
+          ref?: string;
+          selector?: string;
+          target?: string;
         },
       );
     case "fetch":
