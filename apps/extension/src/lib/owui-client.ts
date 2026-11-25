@@ -99,3 +99,9 @@ export async function setDeviceName(name: string) {
 export async function restoreBridge() {
   await send({ type: "owui/restore" });
 }
+
+export async function chatWithTabFromPopup(pageTabId?: number) {
+  const res = await send({ type: "owui/chatWithTab", pageTabId });
+  if (!res.ok) throw new Error(res.error || "Chat with tab failed");
+  return res;
+}

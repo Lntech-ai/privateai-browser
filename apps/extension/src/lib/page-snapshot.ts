@@ -133,9 +133,17 @@ export function buildSnapshotInPage(interactiveOnly: boolean, maxNodes: number):
       return false;
     };
 
+    const isAgentOverlay = (el: Element) => {
+      if (el.id === "__privateai_agent_overlay") return true;
+      if (el.getAttribute("data-pai-agent-overlay")) return true;
+      if (el.tagName.toLowerCase() === "privateai-agent-overlay") return true;
+      return false;
+    };
+
     const visitRoot = (root: Element | ShadowRoot, into: Element[]) => {
       const walk = (el: Element) => {
         if (into.length >= maxNodes) return;
+        if (isAgentOverlay(el)) return;
 
         if (el instanceof HTMLElement || el instanceof SVGElement) {
           if (isVisible(el)) {

@@ -5,6 +5,12 @@
  */
 
 import {
+  ensureAgentOverlayInPage,
+  previewAgentTargetInPage,
+  setAgentOverlayHiddenInPage,
+  teardownAgentOverlayInPage,
+} from "./agent-overlay";
+import {
   buildSnapshotInPage,
   clickInPage,
   hoverInPage,
@@ -16,6 +22,7 @@ import {
 
 const AGENT_GROUP_TITLE = "PrivateAI Browser";
 const ACTIVE_TAB_KEY = "privateai_agent_tab_id";
+const CURSOR_ANIM_MS = 320;
 
 let stopped = false;
 let activeTabId: number | null = null;
@@ -47,7 +54,8 @@ function assertNavigableUrl(url: string) {
   return parsed.href;
 }
 
-async function rememberActiveTab(tabId: number | null) {
+/** Persist the agent tab id (used by Chat with tab + bridge actions). */
+export async function rememberAgentTab(tabId: number | null) {
   activeTabId = tabId;
   try {
     if (tabId == null) {
@@ -57,6 +65,68 @@ async function rememberActiveTab(tabId: number | null) {
     }
   } catch {
     // session storage may be unavailable in some builds
+  }
+}
+
+async function rememberActiveTab(tabId: number | null) {
+  await rememberAgentTab(tabId);
+}
+
+async function sleep(ms: number) {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function showAgentOverlay(tabId: number) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      func: ensureAgentOverlayInPage,
+    });
+  } catch {
+    // restricted URL / inject failure
+  }
+}
+
+async function hideAgentOverlay(tabId: number, hidden: boolean) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      func: setAgentOverlayHiddenInPage,
+      args: [hidden],
+    });
+  } catch {
+    // ignore
+  }
+}
+
+async function removeAgentOverlay(tabId: number | null) {
+  if (tabId == null) return;
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      func: teardownAgentOverlayInPage,
+    });
+  } catch {
+    // ignore
+  }
+}
+
+/** Point cursor + highlight at target before click/type/hover/select. */
+async function previewAgentTarget(tabId: number, target: string) {
+  const trimmed = target.trim();
+  if (!trimmed) {
+    await showAgentOverlay(tabId);
+    return;
+  }
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      func: previewAgentTargetInPage,
+      args: [trimmed],
+    });
+    await sleep(CURSOR_ANIM_MS);
+  } catch {
+    await showAgentOverlay(tabId);
   }
 }
 
@@ -362,8 +432,13 @@ export async function screenshot() {
   assertNotStopped();
   const tabId = await ensureAgentTab();
   await chrome.tabs.update(tabId, { active: true });
-  const dataUrl = await chrome.tabs.captureVisibleTab({ format: "png" });
-  return { ok: true, tabId, dataUrl };
+  await hideAgentOverlay(tabId, true);
+  try {
+    const dataUrl = await chrome.tabs.captureVisibleTab({ format: "png" });
+    return { ok: true, tabId, dataUrl };
+  } finally {
+    await hideAgentOverlay(tabId, false);
+  }
 }
 
 export async function snapshot(params: {
@@ -397,6 +472,7 @@ export async function click(params: {
   }
 
   try {
+    await previewAgentTarget(tabId, target);
     const results = await chrome.scripting.executeScript({
       target: { tabId },
       func: clickInPage,
@@ -425,6 +501,7 @@ export async function typeText(params: {
   const text = String(params.text ?? "");
 
   try {
+    await previewAgentTarget(tabId, target);
     const results = await chrome.scripting.executeScript({
       target: { tabId },
       func: typeInPage,
@@ -507,6 +584,7 @@ export async function hover(params: {
   }
 
   try {
+    await previewAgentTarget(tabId, target);
     const results = await chrome.scripting.executeScript({
       target: { tabId },
       func: hoverInPage,
@@ -533,6 +611,7 @@ export async function selectOption(params: {
   const value = String(params.value || "").trim();
 
   try {
+    await previewAgentTarget(tabId, target);
     const results = await chrome.scripting.executeScript({
       target: { tabId },
       func: selectInPage,
@@ -549,12 +628,16 @@ export async function selectOption(params: {
 
 export async function stopAgents() {
   stopped = true;
-  if (activeTabId != null) await detachDebugger(activeTabId);
+  const tabId = activeTabId ?? (await loadRememberedTabId());
+  await removeAgentOverlay(tabId);
+  if (tabId != null) await detachDebugger(tabId);
   return { ok: true, stopped: true };
 }
 
 export async function resumeAgents() {
   stopped = false;
+  const tabId = activeTabId ?? (await loadRememberedTabId());
+  if (tabId != null) await showAgentOverlay(tabId);
   return { ok: true, stopped: false };
 }
 
@@ -1018,12 +1101,14 @@ const BRIDGE_ACTIONS = [
   "fetch",
   "network_listen",
   "network_log",
+  "chat_with_tab",
   "stop",
   "resume",
 ] as const;
 
 export async function bridgeCapabilities() {
   const manifest = chrome.runtime.getManifest();
+  const { splitViewSupported } = await import("./chat-with-tab");
   return {
     ok: true,
     name: manifest.name,
@@ -1033,6 +1118,8 @@ export async function bridgeCapabilities() {
       fetch: true,
       network_listen: true,
       in_page_fetch: true,
+      chat_with_tab: splitViewSupported(),
+      split_view: splitViewSupported(),
     },
   };
 }
@@ -1106,6 +1193,17 @@ export async function handleAction(action: string, params: Record<string, unknow
       return networkListen(params as { enabled?: boolean });
     case "network_log":
       return networkLog(params as { clear?: boolean; limit?: number });
+    case "chat_with_tab": {
+      const { chatWithTab } = await import("./chat-with-tab");
+      return chatWithTab({
+        pageTabId:
+          typeof params.tab_id === "number"
+            ? params.tab_id
+            : typeof params.pageTabId === "number"
+              ? params.pageTabId
+              : undefined,
+      });
+    }
     case "stop":
       return stopAgents();
     case "resume":

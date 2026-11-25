@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import type { BridgeStatus } from "@/lib/owui-bridge";
 import {
+  chatWithTabFromPopup,
   disconnectBridge,
   getBridgeStatus,
   loginAndConnect,
@@ -10,6 +11,7 @@ import {
   setDeviceName,
   subscribeBridgeStatus,
 } from "@/lib/owui-client";
+import { browserSupportsSplitView } from "@/lib/agent-overlay";
 import { resumeAgents, stopAgents } from "@/lib/browser-actions";
 
 export function OwuiPanel({
@@ -25,6 +27,8 @@ export function OwuiPanel({
   const [deviceName, setDeviceNameInput] = useState(status.deviceName || "");
   const [showPasswordForm, setShowPasswordForm] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [chatError, setChatError] = useState<string | null>(null);
+  const canSplit = browserSupportsSplitView();
 
   useEffect(() => subscribeBridgeStatus(setStatus), []);
 
@@ -84,6 +88,23 @@ export function OwuiPanel({
     } else {
       await stopAgents();
       await setBridgeStopped(true);
+    }
+  }
+
+  async function onChatWithTab() {
+    setChatError(null);
+    setBusy(true);
+    try {
+      // Resolve the tab that opened the popup (currentWindow active).
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (tab?.id == null) {
+        throw new Error("No page tab found. Focus the page tab and try again.");
+      }
+      await chatWithTabFromPopup(tab.id);
+    } catch (error) {
+      setChatError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -204,22 +225,52 @@ export function OwuiPanel({
           )}
         </div>
       ) : (
-        <div className="flex gap-2">
+        <div className="space-y-2">
           <button
             type="button"
-            onClick={onToggleStop}
-            className="flex-1 rounded border border-zinc-300 px-2 py-1.5 text-[12px] dark:border-zinc-600"
+            disabled={busy || !canSplit}
+            onClick={() => void onChatWithTab()}
+            className="w-full rounded bg-blue-600 px-2 py-1.5 text-[12px] font-medium text-white disabled:opacity-50"
+            title={
+              canSplit
+                ? "Open PrivateAI beside this page (Chrome Split View)"
+                : "Requires Chrome 155+ for Split View"
+            }
           >
-            {status.stopped ? "Resume" : "Stop"}
+            {busy ? "Opening…" : "Chat with this tab"}
           </button>
-          <button
-            type="button"
-            disabled={busy}
-            onClick={onDisconnect}
-            className="flex-1 rounded border border-zinc-300 px-2 py-1.5 text-[12px] dark:border-zinc-600"
-          >
-            Disconnect
-          </button>
+          {!canSplit ? (
+            <p className="text-[10px] leading-snug text-amber-700 dark:text-amber-300">
+              Update to Chrome 155+ to use Split View for Chat with this tab.
+            </p>
+          ) : (
+            <p className="text-[10px] leading-snug text-zinc-500">
+              Splits Open WebUI beside the current page. Agents drive that page with a visible
+              cursor.
+            </p>
+          )}
+          {chatError ? (
+            <div className="rounded bg-red-50 px-2 py-1 text-[11px] text-red-700 dark:bg-red-950/40 dark:text-red-300">
+              {chatError}
+            </div>
+          ) : null}
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={onToggleStop}
+              className="flex-1 rounded border border-zinc-300 px-2 py-1.5 text-[12px] dark:border-zinc-600"
+            >
+              {status.stopped ? "Resume" : "Stop"}
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={onDisconnect}
+              className="flex-1 rounded border border-zinc-300 px-2 py-1.5 text-[12px] dark:border-zinc-600"
+            >
+              Disconnect
+            </button>
+          </div>
         </div>
       )}
     </div>

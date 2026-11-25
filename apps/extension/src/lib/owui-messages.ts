@@ -9,10 +9,18 @@ export type OwuiRequest =
   | { type: "owui/disconnect" }
   | { type: "owui/setStopped"; value: boolean }
   | { type: "owui/setDeviceName"; name: string }
-  | { type: "owui/restore" };
+  | { type: "owui/restore" }
+  | { type: "owui/chatWithTab"; pageTabId?: number };
 
 export type OwuiResponse =
-  | { ok: true; status: BridgeStatus; paired?: boolean }
+  | {
+      ok: true;
+      status: BridgeStatus;
+      paired?: boolean;
+      pageTabId?: number;
+      owuiTabId?: number;
+      splitViewId?: number;
+    }
   | { ok: false; error: string; status?: BridgeStatus };
 
 export function isOwuiRequest(msg: unknown): msg is OwuiRequest {

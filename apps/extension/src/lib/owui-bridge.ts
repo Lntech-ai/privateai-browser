@@ -384,6 +384,24 @@ async function handleOwuiRequest(msg: OwuiRequest): Promise<OwuiResponse> {
       case "owui/restore":
         await restoreBridge();
         return { ok: true, status: getBridgeStatus() };
+      case "owui/chatWithTab": {
+        const { chatWithTab } = await import("./chat-with-tab");
+        const result = await chatWithTab({ pageTabId: msg.pageTabId });
+        if (!result.ok) {
+          return {
+            ok: false,
+            error: result.error || "Chat with tab failed",
+            status: getBridgeStatus(),
+          };
+        }
+        return {
+          ok: true,
+          status: getBridgeStatus(),
+          pageTabId: result.pageTabId,
+          owuiTabId: result.owuiTabId,
+          splitViewId: result.splitViewId,
+        };
+      }
       default:
         return { ok: false, error: "Unknown OWUI message", status: getBridgeStatus() };
     }
